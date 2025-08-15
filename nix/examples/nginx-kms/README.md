@@ -14,6 +14,14 @@ Before you begin, ensure you have the following:
 - Nix package manager installed
 - `jq` command-line JSON processor
 
+## Important Note on Secure Boot and Reproducibility
+
+When using secure boot enabled builds (e.g., `raw-image-secure-boot`), the builds are **NOT reproducible** because this example generates cryptographic keys at build time. Each build will produce different keys and therefore different measurements for PCR7.
+
+In production scenarios, you should use consistent key material across builds to maintain reproducible measurements.
+
+The non-secure-boot builds (`raw-image`) remain fully reproducible.
+
 ## Getting Started
 Follow these steps to set up and test the Attestable AMI:
 

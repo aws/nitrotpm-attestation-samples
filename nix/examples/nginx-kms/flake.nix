@@ -12,6 +12,7 @@
           pkgs = nixpkgs.legacyPackages."${system}";
           fcgiScript = pkgs.callPackage ./fcgi-script.nix { };
           kmsInitScript = { key-group }: pkgs.callPackage ./kms-init.nix { inherit nitro-tee key-group; };
+          secureBootData = pkgs.callPackage ./secure-boot-data.nix { };
 
           # Common configuration shared between production and debug builds
           commonUserConfig = { config, pkgs, lib, ... }: {
@@ -77,24 +78,43 @@
         {
           packages = {
             # Production build (default)
+
             raw-image = nitro-tee.lib.${system}.tee-image {
               userConfig = commonUserConfig;
               isDebug = false;
             };
 
+            raw-image-secure-boot = nitro-tee.lib.${system}.tee-image {
+              userConfig = commonUserConfig;
+              isDebug = false;
+              secureBootData = secureBootData;
+            };
+
             # Debug build with console access enabled
             # WARNING: This enables operator access and bypasses security!
-            raw-image-debug =
-              nitro-tee.lib.${system}.tee-image {
-                userConfig = commonUserConfig;
-                isDebug = true;
-              };
+
+            raw-image-debug = nitro-tee.lib.${system}.tee-image {
+              userConfig = commonUserConfig;
+              isDebug = true;
+            };
+
+            raw-image-secure-boot-debug = nitro-tee.lib.${system}.tee-image {
+              userConfig = commonUserConfig;
+              isDebug = true;
+              secureBootData = secureBootData;
+            };
           };
 
           # Expose the apps from nitro-tee
           apps = {
             boot-uefi-qemu = nitro-tee.apps.${system}.boot-uefi-qemu;
             create-ami = nitro-tee.apps.${system}.create-ami;
+            create-ami-secure-boot = {
+              type = "app";
+              program = "${pkgs.writeShellScript "create-ami-secure-boot" ''
+                ${nitro-tee.apps.${system}.create-ami.program} "$1" "${secureBootData.uefiVarStore}/uefi_data.aws"
+              ''}";
+            };
           };
         }
       );

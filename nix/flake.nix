@@ -28,9 +28,9 @@
 
             lib = {
               # Lib function to build a raw TEE image
-              tee-image = { userConfig ? { }, isDebug ? false } :
+              tee-image = { userConfig ? { }, isDebug ? false, secureBootData ? null } :
                 pkgs.callPackage ./image/lib.nix {
-                  inherit craneLib nixos-generators userConfig isDebug;
+                  inherit craneLib nixos-generators userConfig isDebug secureBootData;
                   tee-pkgs = packages;
                 };
             };

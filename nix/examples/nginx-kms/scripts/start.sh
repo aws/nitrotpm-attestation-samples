@@ -1,9 +1,14 @@
 #!/bin/bash
 
 # Parse command line arguments
+SECURE_BOOT_FLAG=""
 DEBUG_FLAG=""
 while [[ $# -gt 0 ]]; do
   case $1 in
+    --secure-boot)
+      SECURE_BOOT_FLAG="--secure-boot"
+      shift
+      ;;
     --debug)
       DEBUG_FLAG="--debug"
       shift
@@ -74,6 +79,11 @@ check_credentials_var() {
 
 echo "Starting deployment process..."
 
+# Display secure boot warning if secure boot mode is enabled
+if [ -n "$SECURE_BOOT_FLAG" ]; then
+  echo -e "\033[33m⚠️  WARNING: Secure boot builds are NOT reproducible (keys generated at build time)! ⚠️\033[0m"
+fi
+
 # Display debug warning if debug mode is enabled
 if [ -n "$DEBUG_FLAG" ]; then
   echo -e "\033[31m⚠️  WARNING: Building in DEBUG mode with operator access enabled! ⚠️\033[0m"
@@ -88,7 +98,7 @@ check_credentials_var AWS_DEFAULT_REGION
 echo "AWS credentials are set and validated."
 
 echo "Step 1: Creating AMI..."
-OUTPUT=$("$SCRIPT_DIR/steps/00_create_ami.sh" $DEBUG_FLAG)
+OUTPUT=$("$SCRIPT_DIR/steps/00_create_ami.sh" $SECURE_BOOT_FLAG $DEBUG_FLAG)
 
 if [ $? -ne 0 ]; then
   echo "Error: AMI creation failed"
