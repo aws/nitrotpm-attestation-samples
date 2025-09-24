@@ -5,9 +5,8 @@
 }:
 let
     src = builtins.fetchGit {
-        url = "ssh://git.amazon.com:2222/pkg/Aws-nitro-tpm-tools";
-        rev = "a5ab37290be13785daf15734c36123779ecdc369";
-        ref = "mainline";
+        url = "https://github.com/aws/NitroTPM-Tools.git";
+        ref = "main";
     };
 
     cargoArtifacts = craneLib.buildDepsOnly {
