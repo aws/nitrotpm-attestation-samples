@@ -2,7 +2,8 @@ Third-Party Notices
 
 This project incorporates components from the projects listed below. The original copyright notices and the licenses under which nitrotpm-attestation-samples received such components are set forth below.
 
-- teemanager (https://github.com/haraldh/teemanager)
+- teemager (https://github.com/haraldh/teemager)
   Copyright (c) 2003-2025 Eelco Dolstra and the Nixpkgs/NixOS contributors
+  Author: Harald Hoyer
   License: MIT
   https://github.com/haraldh/teemager/blob/main/LICENSE
