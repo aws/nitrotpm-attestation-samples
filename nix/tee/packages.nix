@@ -6,13 +6,13 @@
 let
     src = builtins.fetchGit {
         url = "https://github.com/aws/NitroTPM-Tools.git";
-        ref = "main";
+        rev = "50f0fb58a306ee89c7994183cbce3bf4f3331207";
     };
 
     cargoArtifacts = craneLib.buildDepsOnly {
         inherit src;
         pname = "nitro-tpm-tools";
-        version = "0.0.1";
+        version = "1.0.0";
         strictDeps = true;
         doCheck = false;
 
@@ -28,7 +28,7 @@ in {
     kms-decrypt-app = craneLib.buildPackage {
         inherit cargoArtifacts src;
         pname = "kms-decrypt-app";
-        version = "0.0.1";
+        version = "1.0.0";
 
         cargoExtraArgs = "--example nitro-tpm-kms-decrypt";
         strictDeps = true;

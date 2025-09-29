@@ -14,11 +14,10 @@ let
     pcr-compute = craneLib.buildPackage {
         cargoArtifacts = tee-pkgs.kms-decrypt-app.cargoArtifacts;
         pname = "nitro-tpm-pcr-compute";
-        version = "0.0.1";
+        version = "1.0.0";
         src = builtins.fetchGit {
-            url = "git@github.com:aws/NitroTPM-Tools.git";
-            rev = "eab69e7a4ebd0f6d5d41ff80882df6292d3e2b38";
-            ref = "main";
+            url = "https://github.com/aws/NitroTPM-Tools.git";
+            rev = "50f0fb58a306ee89c7994183cbce3bf4f3331207";
         };
         cargoExtraArgs = "--package nitro-tpm-pcr-compute";
         strictDeps = true;
