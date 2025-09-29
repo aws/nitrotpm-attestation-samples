@@ -45,23 +45,8 @@ else
   echo "Role $ROLE_NAME already exists."
 fi
 
-# Attach the TpmEkPub customer inline policy to the role
-aws iam put-role-policy \
-  --role-name "$ROLE_NAME" \
-  --policy-name TpmEkPub \
-  --policy-document '{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": "ec2:GetInstanceTpmEkPub",
-      "Resource": "*"
-    }
-  ]
-}'
-
 # Create the instance profile and add the role
 aws iam create-instance-profile --instance-profile-name "$INSTANCE_PROFILE_NAME"
 aws iam add-role-to-instance-profile --instance-profile-name "$INSTANCE_PROFILE_NAME" --role-name "$ROLE_NAME"
 
-echo "$ROLE_NAME role, TpmEkPub policy, and $INSTANCE_PROFILE_NAME instance profile have been created successfully."
+echo "$ROLE_NAME role and $INSTANCE_PROFILE_NAME instance profile have been created successfully."
