@@ -19,6 +19,7 @@
             systemd.services.kms-init = {
               description = "Initialize KMS and decrypt symmetric key";
               wantedBy = [ "multi-user.target" ];
+              requires = [ "network-online.target" ];
               after = [ "network-online.target" ];
               serviceConfig = {
                 Type = "oneshot";
