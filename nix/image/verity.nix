@@ -89,6 +89,7 @@ in {
     "systemd.verity=1"
     "systemd.verity_root_options=panic-on-corruption"
     "tpm_crb.force=1"
+    "systemd.gpt_auto=0" # Disable systemd-gpt-auto-generator to prevent e.g. ESP mounting
   ];
   #networking.hostName = lib.mkDefault "nixos";
 
