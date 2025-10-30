@@ -13,15 +13,15 @@ let
   coldsnap = pkgs.fetchFromGitHub {
     owner = "awslabs";
     repo = "coldsnap";
-    rev = "v0.8.0";
-    sha256 = "sha256-ZN+gSoWrmGmN1jYxKLO06hRVyTM5WUXRjsfkcKcdXfM=";
+    rev = "v0.9.0";
+    sha256 = "sha256-8+YPKjHi3VURzSOflIa0x4uBkoDMYGFJiFcNJ+8NJ7Q=";
   };
 
   coldsnapBinary = pkgs.rustPlatform.buildRustPackage {
     pname = "coldsnap";
-    version = "0.8.0";
+    version = "0.9.0";
     src = coldsnap;
-    cargoHash = "sha256-ZWJa/J5sfBA/F28TkXyspygN1ZkNz2TIEKTsusN4SOc=";
+    cargoHash = "sha256-4w79zZcgIulLIArY2ErOHwaWA8g/mA2cSKCzJx4X9vM=";
     nativeBuildInputs = with pkgs; [ pkg-config ];
     buildInputs = with pkgs; [ openssl ];
   };
