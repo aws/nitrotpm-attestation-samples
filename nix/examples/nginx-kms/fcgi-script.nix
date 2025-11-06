@@ -37,7 +37,7 @@ pkgs.writeScript "decrypt-wrapper.sh" ''
   fi
 
   # Read the symmetric key
-  SYMMETRIC_KEY=$(cat /run/symmetric_key | ${pkgs.coreutils}/bin/base64 -d | ${pkgs.xxd}/bin/xxd -p -c 32 | tr -d '\n')
+  SYMMETRIC_KEY=$(cat /run/kms-init/symmetric_key | ${pkgs.coreutils}/bin/base64 -d | ${pkgs.xxd}/bin/xxd -p -c 32 | tr -d '\n')
 
   # Extract IV (first 32 characters, as it's in hex format) and the rest is the actual ciphertext
   IV=''${CIPHERTEXT:0:32}

@@ -2,7 +2,6 @@
   pkgs,
   system,
   nitro-tee,
-  key-group,
   ...
 }:
 pkgs.writeScript "kms-init.sh" ''
@@ -23,7 +22,5 @@ pkgs.writeScript "kms-init.sh" ''
   SYMMETRIC_KEY=$(${nitro-tee.packages.${system}.kms-decrypt-app}/bin/nitro-tpm-kms-decrypt --key-id "$KEY_ID" "$CIPHERTEXT")
 
   # Save the symmetric key to a known location
-  echo "$SYMMETRIC_KEY" > /run/symmetric_key
-  chmod 640 /run/symmetric_key
-  chown root:${key-group} /run/symmetric_key
+  echo "$SYMMETRIC_KEY" > /run/kms-init/symmetric_key
 ''
