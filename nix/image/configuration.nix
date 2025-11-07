@@ -7,6 +7,7 @@
   imports = [
     "${toString modulesPath}/profiles/minimal.nix"
     "${toString modulesPath}/profiles/qemu-guest.nix"
+    ./instance-storage.nix
   ];
 
   system.image = {
