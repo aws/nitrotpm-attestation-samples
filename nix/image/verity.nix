@@ -37,6 +37,13 @@ in {
   };
 
   image.repart = {
+    mkfsOptions = {
+      # prevents non-reproducible images, where the builders FS allowed reflinks
+      # or not, which are used to construct the final nix store
+      squashfs = [ "-no-hardlinks" ];
+      erofs = [ "--hard-dereference" ];
+    };
+
     verityStore = {
       enable = true;
       # by default the module works with systemd-boot, for simplicity this test directly boots the UKI
