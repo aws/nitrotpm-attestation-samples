@@ -35,10 +35,12 @@ if [ -z "$INSTANCE_TYPE" ]; then
   AMI_ARCH=$(aws ec2 describe-images --image-ids "$AMI_ID" --query 'Images[0].Architecture' --output text)
   
   if [ "$AMI_ARCH" == "arm64" ]; then
-    INSTANCE_TYPE="c6g.2xlarge"  # ARM-based instance (Graviton)
+    # Using instance type with NVMe instance storage (the 'd' suffix indicates local storage)
+    INSTANCE_TYPE="c6gd.12xlarge"  # ARM-based instance (Graviton) with 1x474 GB NVMe SSD
     echo "AMI architecture is ARM64, using instance type: $INSTANCE_TYPE"
   else
-    INSTANCE_TYPE="m6i.4xlarge"  # x86_64 instance (Intel)
+    # Using instance type with NVMe instance storage (the 'd' suffix indicates local storage)
+    INSTANCE_TYPE="m6id.16xlarge"  # x86_64 instance (Intel) with 1x950 GB NVMe SSD
     echo "AMI architecture is x86_64, using instance type: $INSTANCE_TYPE"
   fi
 else
