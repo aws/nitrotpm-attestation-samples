@@ -2,7 +2,6 @@
   pkgs,
   lib,
   system,
-  craneLib,
   nixos-generators,
   tee-pkgs,
   userConfig ? { },
@@ -11,26 +10,6 @@
   ...
 }:
 let
-    # Reuse cargoArtifacts from tee-pkgs to avoid building dependencies twice
-    pcr-compute = craneLib.buildPackage {
-        cargoArtifacts = tee-pkgs.kms-decrypt-app.cargoArtifacts;
-        pname = "nitro-tpm-pcr-compute";
-        version = "1.1.0";
-        src = builtins.fetchGit {
-            url = "https://github.com/aws/NitroTPM-Tools.git";
-            rev = "a37ff598acf32e3c8c2c85d53bb8f4025b0a12d7";
-        };
-        cargoExtraArgs = "--package nitro-tpm-pcr-compute";
-        strictDeps = true;
-        doCheck = false;
-
-        nativeBuildInputs = [
-            pkgs.pkg-config
-        ];
-        buildInputs = [
-            pkgs.tpm2-tss
-        ];
-    };
 
     # Sign EFI binary with secure boot keys if secureBootData is provided
     sign-efi = efiPath:
@@ -62,6 +41,7 @@ let
         environment = {
             systemPackages = [
                 tee-pkgs.kms-decrypt-app
+                pkgs.nitrotpm-tools
                 # debugging tools
                 pkgs.openssl
                 pkgs.tpm2-tools
@@ -113,7 +93,7 @@ let
                 );
             in ''
                 # Compute TPM PCR values including secure boot measurements
-                ${pcr-compute}/bin/nitro-tpm-pcr-compute --image ${finalEfiPath} ${lib.concatStringsSep " " secureBootArgs} > $out/tpm_pcr.json
+                ${pkgs.nitrotpm-tools}/bin/nitro-tpm-pcr-compute --image ${finalEfiPath} ${lib.concatStringsSep " " secureBootArgs} > $out/tpm_pcr.json
 
                 ${lib.optionalString (secureBootData != null) ''
                     # Verify the EFI binary signature for secure boot compliance
