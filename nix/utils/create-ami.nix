@@ -9,28 +9,11 @@ let
     botocore
   ]);
 
-  # Coldsnap for creating EBS snapshots from raw images
-  coldsnap = pkgs.fetchFromGitHub {
-    owner = "awslabs";
-    repo = "coldsnap";
-    rev = "v0.9.0";
-    sha256 = "sha256-8+YPKjHi3VURzSOflIa0x4uBkoDMYGFJiFcNJ+8NJ7Q=";
-  };
-
-  coldsnapBinary = pkgs.rustPlatform.buildRustPackage {
-    pname = "coldsnap";
-    version = "0.9.0";
-    src = coldsnap;
-    cargoHash = "sha256-4w79zZcgIulLIArY2ErOHwaWA8g/mA2cSKCzJx4X9vM=";
-    nativeBuildInputs = with pkgs; [ pkg-config ];
-    buildInputs = with pkgs; [ openssl ];
-  };
-
   script = pkgs.writeShellApplication {
     name = "create-ami";
     runtimeInputs = with pkgs; [
       awscli2
-      coldsnapBinary
+      coldsnap
     ];
 
     text = ''
