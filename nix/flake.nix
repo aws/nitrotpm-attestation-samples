@@ -7,30 +7,24 @@
       url = "github:nix-community/nixos-generators";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    crane.url = "github:ipetkov/crane";
-    rust-overlay.url = "github:oxalica/rust-overlay";
   };
-  outputs = { self, nixpkgs, flake-utils, nixos-generators, crane, rust-overlay, ... }:
+  outputs = { self, nixpkgs, flake-utils, nixos-generators, ... }:
     flake-utils.lib.eachDefaultSystem
       (system:
         let
           pkgs = import nixpkgs {
             inherit system;
-            overlays = [ (import rust-overlay) ];
           };
-          craneLib = (crane.mkLib pkgs).overrideToolchain pkgs.rust-bin.stable.latest.default;
         in
           rec {
             # All the packages used inside of TEE
-            packages = pkgs.callPackage ./tee/packages.nix {
-              inherit craneLib;
-            };
+            packages = pkgs.callPackage ./tee/packages.nix { };
 
             lib = {
               # Lib function to build a raw TEE image
               tee-image = { userConfig ? { }, isDebug ? false, secureBootData ? null } :
                 pkgs.callPackage ./image/lib.nix {
-                  inherit craneLib nixos-generators userConfig isDebug secureBootData;
+                  inherit nixos-generators userConfig isDebug secureBootData;
                   tee-pkgs = packages;
                 };
             };
