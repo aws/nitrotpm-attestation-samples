@@ -27,6 +27,7 @@ KMS_KEY_ID=$(jq -r '.KMS_KEY_ID // empty' "$RESOURCES_FILE")
 INSTANCE_ID=$(jq -r '.INSTANCE_ID // empty' "$RESOURCES_FILE")
 SECURITY_GROUP_ID=$(jq -r '.SECURITY_GROUP_ID // empty' "$RESOURCES_FILE")
 VOLUME_ID=$(jq -r '.VOLUME_ID // empty' "$RESOURCES_FILE")
+SECRET_ARN=$(jq -r '.SECRET_ARN // empty' "$RESOURCES_FILE")
 
 # Track cleanup success
 CLEANUP_SUCCESS=true
@@ -49,6 +50,12 @@ run_aws_command_optional() {
     return 1
   fi
 }
+
+# Delete Secrets Manager secret (mTLS client certificates)
+if [ -n "$SECRET_ARN" ]; then
+  echo "Deleting Secrets Manager secret: $SECRET_ARN"
+  run_aws_command_optional secretsmanager delete-secret --secret-id "$SECRET_ARN" --force-delete-without-recovery
+fi
 
 # Terminate EC2 instance
 if [ -n "$INSTANCE_ID" ]; then

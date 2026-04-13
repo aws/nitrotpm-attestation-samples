@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euo pipefail
+set -euox pipefail
 
 usage() {
   echo "Usage: $0 -r INSTANCE_ROLE -a ADMIN_ROLE [-m MEASUREMENTS] | --instance-role INSTANCE_ROLE --admin-role ADMIN_ROLE [--measurements MEASUREMENTS]"
@@ -187,4 +187,4 @@ KEY_ID=$(echo "$KEY_OUTPUT" | jq -r '.KeyMetadata.KeyId')
 echo "KMS key created with ID: $KEY_ID"
 
 # Clean up temporary policy file
-rm -f "$KEY_POLICY_FILE"
+# rm -f "$KEY_POLICY_FILE"

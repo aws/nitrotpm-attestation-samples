@@ -5,6 +5,7 @@ set -x
 # Parse command line arguments
 SECURE_BOOT_FLAG=""
 DEBUG_FLAG=""
+VPC_ID_FLAG=""
 while [[ $# -gt 0 ]]; do
   case $1 in
     --secure-boot)
@@ -14,6 +15,10 @@ while [[ $# -gt 0 ]]; do
     --debug)
       DEBUG_FLAG="--debug"
       shift
+      ;;
+    --vpc-id)
+      VPC_ID_FLAG="--vpc-id $2"
+      shift; shift
       ;;
     *)
       echo "Unknown option $1"
@@ -124,7 +129,11 @@ ROLE_NAME="TpmAttestationRole"
 INSTANCE_PROFILE_NAME="TpmAttestationProfile"
 
 echo "Creating/checking role '$ROLE_NAME' and instance profile '$INSTANCE_PROFILE_NAME'..."
-OUTPUT=$("$SCRIPT_DIR/steps/01_create_instance_profile.sh" -r "$ROLE_NAME" -p "$INSTANCE_PROFILE_NAME")
+if [ -n "$DEBUG_FLAG" ]; then
+  OUTPUT=$("$SCRIPT_DIR/steps/01_create_instance_profile.sh" -r "$ROLE_NAME" -p "$INSTANCE_PROFILE_NAME" --debug)
+else
+  OUTPUT=$("$SCRIPT_DIR/steps/01_create_instance_profile.sh" -r "$ROLE_NAME" -p "$INSTANCE_PROFILE_NAME")
+fi
 
 if [ $? -ne 0 ]; then
   echo "Error: IAM role and instance profile setup failed"
@@ -139,7 +148,6 @@ echo "IAM role and instance profile setup completed."
 echo "Step 3: Creating KMS key..."
 INSTANCE_ROLE_ARN=$(aws iam get-role --role-name "$ROLE_NAME" --query 'Role.Arn' --output text)
 ADMIN_ROLE_ARN=$(aws sts get-caller-identity --query 'Arn' --output text)
-
 echo "Creating KMS key with instance role '$INSTANCE_ROLE_ARN' and admin role '$ADMIN_ROLE_ARN'..."
 OUTPUT=$("$SCRIPT_DIR/steps/02_create_kms_key.sh" -r "$INSTANCE_ROLE_ARN" -a "$ADMIN_ROLE_ARN" -m "$SCRIPT_DIR/../result")
 
@@ -171,7 +179,24 @@ fi
 
 echo "Symmetric key and user data created successfully."
 
-echo "Step 5: Creating EBS volume..."
+echo "Step 5a: Creating certificates..."
+OUTPUT=$("$SCRIPT_DIR/steps/05a_create_certificates.sh" -k "$KMS_KEY_ID" -r "$ROLE_NAME")
+
+if [ $? -ne 0 ]; then
+  echo "Error: Certificate creation failed"
+  echo "$OUTPUT"
+  exit 1
+fi
+
+SECRET_ARN=$(echo "$OUTPUT" | grep -oP 'SECRET_ARN: \K.*')
+
+if [ -n "$SECRET_ARN" ]; then
+  update_resource "SECRET_ARN" "$SECRET_ARN"
+fi
+
+echo "Certificates created successfully."
+
+echo "Step 6: Creating EBS volume..."
 AVAILABILITY_ZONE=$(aws ec2 describe-availability-zones --query 'AvailabilityZones[0].ZoneName' --output text 2>/dev/null || echo "${AWS_DEFAULT_REGION}a")
 
 echo "Creating blank EBS volume in availability zone '$AVAILABILITY_ZONE'..."
@@ -194,11 +219,11 @@ fi
 update_resource "VOLUME_ID" "$VOLUME_ID"
 echo "EBS volume created successfully. Volume ID: $VOLUME_ID"
 
-echo "Step 6: Launching EC2 instance..."
+echo "Step 7: Launching EC2 instance..."
 if [ -n "$DEBUG_FLAG" ]; then
-  OUTPUT=$("$SCRIPT_DIR/steps/05_run_instance.sh" -a "$AMI_ID" -p "$INSTANCE_PROFILE_NAME" -v "$VOLUME_ID" --debug)
+  OUTPUT=$("$SCRIPT_DIR/steps/05_run_instance.sh" -a "$AMI_ID" -p "$INSTANCE_PROFILE_NAME" -v "$VOLUME_ID" $VPC_ID_FLAG --debug)
 else
-  OUTPUT=$("$SCRIPT_DIR/steps/05_run_instance.sh" -a "$AMI_ID" -p "$INSTANCE_PROFILE_NAME" -v "$VOLUME_ID")
+  OUTPUT=$("$SCRIPT_DIR/steps/05_run_instance.sh" -a "$AMI_ID" -p "$INSTANCE_PROFILE_NAME" -v "$VOLUME_ID" $VPC_ID_FLAG)
 fi
 
 if [ $? -ne 0 ]; then
@@ -208,10 +233,10 @@ if [ $? -ne 0 ]; then
 fi
 
 INSTANCE_ID=$(echo "$OUTPUT" | grep -oP 'Instance ID: \K.*')
-PUBLIC_IP=$(echo "$OUTPUT" | grep -oP 'Public IP: \K.*')
+PRIVATE_IP=$(echo "$OUTPUT" | grep -oP 'Private IP: \K.*')
 SG_ID=$(echo "$OUTPUT" | grep -oP 'Security Group ID: \K.*')
 
-if [ -z "$INSTANCE_ID" ] || [ -z "$PUBLIC_IP" ] || [ -z "$SG_ID" ]; then
+if [ -z "$INSTANCE_ID" ] || [ -z "$PRIVATE_IP" ] || [ -z "$SG_ID" ]; then
   echo "Error: Unable to extract instance details from the output"
   echo "$OUTPUT"
   exit 1
@@ -228,12 +253,15 @@ echo "  - AMI ID: $AMI_ID"
 echo "  - IAM Role: $ROLE_NAME"
 echo "  - Instance Profile: $INSTANCE_PROFILE_NAME"
 echo "  - KMS Key ID: $KMS_KEY_ID"
+if [ -n "${SECRET_ARN:-}" ]; then
+  echo "  - Secret ARN: $SECRET_ARN"
+fi
 echo "  - EBS Volume ID: $VOLUME_ID"
 echo "  - Artifacts: $SCRIPT_DIR/../artifacts/"
 echo "  - EC2 Instance ID: $INSTANCE_ID"
-echo "  - EC2 Public IP: $PUBLIC_IP"
+echo "  - EC2 Private IP: $PRIVATE_IP"
 echo "  - Security Group ID: $SG_ID"
 
 echo "Resource IDs have been saved to $RESOURCES_FILE"
 
-echo "You can test PostgreSQL connectivity by running: ./test.sh --server $PUBLIC_IP"
+echo "You can connect via SSM: aws ssm start-session --target $INSTANCE_ID"
