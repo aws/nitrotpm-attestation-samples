@@ -32,6 +32,7 @@ in {
     # bind-mount the store
     "/nix/store" = {
       device = "/usr/nix/store";
+      fsType = "none";
       options = ["bind"];
     };
   };

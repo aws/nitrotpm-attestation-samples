@@ -4,17 +4,19 @@ set -euo pipefail
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 
 usage() {
-  echo "Usage: $0 -a AMI_ID -p INSTANCE_PROFILE_NAME -v VOLUME_ID [-t INSTANCE_TYPE] [--debug]"
+  echo "Usage: $0 -a AMI_ID -p INSTANCE_PROFILE_NAME -v VOLUME_ID [-t INSTANCE_TYPE] [--vpc-id VPC_ID] [--debug]"
   echo "  -a, --ami-id                 Specify the AMI ID"
   echo "  -p, --profile                Specify the Instance Profile name"
   echo "  -v, --volume-id              Specify the EBS Volume ID to attach"
   echo "  -t, --instance-type          Specify the Instance Type (auto-detected from AMI arch if omitted)"
-  echo "      --debug                  Allow inbound SSH (port 22) on the security group"
+  echo "      --vpc-id                 Specify the VPC ID (uses default VPC if omitted)"
+  echo "      --debug                  Enable debug mode (SSM access, no additional inbound ports needed)"
   exit 1
 }
 
 SECURITY_GROUP_NAME="PostgresKMS-TestSG"
 DEBUG=false
+VPC_ID=""
 
 # Parse command line arguments
 while [[ "$#" -gt 0 ]]; do
@@ -23,6 +25,7 @@ while [[ "$#" -gt 0 ]]; do
     -p|--profile) INSTANCE_PROFILE_NAME="$2"; shift ;;
     -v|--volume-id) VOLUME_ID="$2"; shift ;;
     -t|--instance-type) INSTANCE_TYPE="$2"; shift ;;
+    --vpc-id) VPC_ID="$2"; shift ;;
     --debug) DEBUG=true ;;
     *) usage ;;
   esac
@@ -51,45 +54,61 @@ else
   echo "Using specified instance type: $INSTANCE_TYPE"
 fi
 
-# Check if the security group exists, if not create it
-if ! SG_ID=$(aws ec2 describe-security-groups --group-names "$SECURITY_GROUP_NAME" --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null); then
-  echo "Security group does not exist. Creating a new one..."
-  SG_ID=$(aws ec2 create-security-group --group-name "$SECURITY_GROUP_NAME" --description "Security group for PostgresKMS test" --query 'GroupId' --output text)
-  if [ "$DEBUG" = true ]; then
-    echo "Debug mode: allowing inbound SSH (port 22)..."
-    aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 22 --cidr 0.0.0.0/0
-  else
-    echo "Production mode: no inbound rules."
-  fi
-else
-  echo "Security group already exists. Using existing group."
+# Resolve VPC ID and CIDR
+if [ -z "$VPC_ID" ]; then
+  VPC_ID=$(aws ec2 describe-vpcs --filters "Name=isDefault,Values=true" --query 'Vpcs[0].VpcId' --output text)
+  echo "Using default VPC: $VPC_ID"
 fi
 
-# Determine the availability zone of the EBS volume so the instance launches in the same AZ
+VPC_CIDR=$(aws ec2 describe-vpcs --vpc-ids "$VPC_ID" --query 'Vpcs[0].CidrBlock' --output text)
+echo "VPC CIDR: $VPC_CIDR"
+
+# Pick a subnet in the same AZ as the EBS volume
 VOLUME_AZ=$(aws ec2 describe-volumes --volume-ids "$VOLUME_ID" --query 'Volumes[0].AvailabilityZone' --output text)
 echo "EBS volume is in availability zone: $VOLUME_AZ"
 
-# Launch the EC2 instance in the same AZ as the volume
+SUBNET_ID=$(aws ec2 describe-subnets \
+  --filters "Name=vpc-id,Values=$VPC_ID" "Name=availability-zone,Values=$VOLUME_AZ" \
+  --query 'Subnets[0].SubnetId' --output text)
+echo "Using subnet: $SUBNET_ID in $VOLUME_AZ"
+
+# Check if the security group exists in this VPC, if not create it
+if ! SG_ID=$(aws ec2 describe-security-groups \
+    --filters "Name=group-name,Values=$SECURITY_GROUP_NAME" "Name=vpc-id,Values=$VPC_ID" \
+    --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null) || [ "$SG_ID" = "None" ]; then
+  echo "Security group does not exist. Creating in VPC $VPC_ID..."
+  SG_ID=$(aws ec2 create-security-group \
+    --group-name "$SECURITY_GROUP_NAME" \
+    --description "Security group for PostgresKMS test" \
+    --vpc-id "$VPC_ID" \
+    --query 'GroupId' --output text)
+  echo "Allowing inbound PostgreSQL (port 5432) from VPC CIDR $VPC_CIDR..."
+  aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 5432 --cidr "$VPC_CIDR"
+else
+  echo "Security group already exists. Using existing group: $SG_ID"
+fi
+
+# Launch the EC2 instance in the same AZ as the volume (no public IP — access via SSM and VPC-internal mTLS)
 INSTANCE_OUTPUT=$(aws ec2 run-instances \
   --image-id "$AMI_ID" \
   --instance-type "$INSTANCE_TYPE" \
   --iam-instance-profile "Name=$INSTANCE_PROFILE_NAME" \
   --user-data file://"$SCRIPT_DIR/../../artifacts/user_data.json" \
-  --associate-public-ip-address \
   --security-group-ids "$SG_ID" \
-  --placement "AvailabilityZone=$VOLUME_AZ" \
-  --query 'Instances[0].{InstanceId:InstanceId,PublicIpAddress:PublicIpAddress}' \
+  --subnet-id "$SUBNET_ID" \
+  --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=PostgresKMS-TEE}]" \
+  --query 'Instances[0].{InstanceId:InstanceId,PrivateIpAddress:PrivateIpAddress}' \
   --output json)
 
 INSTANCE_ID=$(echo "$INSTANCE_OUTPUT" | jq -r '.InstanceId')
-PUBLIC_IP=$(echo "$INSTANCE_OUTPUT" | jq -r '.PublicIpAddress')
+PRIVATE_IP=$(echo "$INSTANCE_OUTPUT" | jq -r '.PrivateIpAddress')
 
 if [ -z "$INSTANCE_ID" ]; then
   echo "Error: Failed to launch EC2 instance"
   exit 1
 fi
 
-echo "EC2 instance launched successfully. Instance ID: $INSTANCE_ID"
+echo "EC2 instance launched successfully."
 
 # Wait for the instance to be in running state
 echo "Waiting for the instance to be in running state..."
@@ -104,11 +123,9 @@ aws ec2 wait volume-in-use --volume-ids "$VOLUME_ID"
 
 echo "EBS volume attached successfully."
 
-# If public IP is not available immediately, try to fetch it again
-if [ -z "$PUBLIC_IP" ] || [ "$PUBLIC_IP" == "null" ]; then
-  PUBLIC_IP=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
-fi
+# Get the private IP
+PRIVATE_IP=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --query 'Reservations[0].Instances[0].PrivateIpAddress' --output text)
 
 echo "Instance ID: $INSTANCE_ID"
-echo "Public IP: $PUBLIC_IP"
+echo "Private IP: $PRIVATE_IP"
 echo "Security Group ID: $SG_ID"
