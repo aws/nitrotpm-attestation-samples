@@ -1,0 +1,36 @@
+Starting deployment process...
+Checking AWS credentials...
+AWS_ACCESS_KEY_ID is set in environment
+AWS_SECRET_ACCESS_KEY is set in environment
+AWS_SESSION_TOKEN is set in environment
+AWS_DEFAULT_REGION is set in environment
+AWS credentials are set and validated.
+Step 1: Creating AMI...
+AMI created successfully. AMI ID: ami-0be0e3f8833ab104b
+Step 2: Setting up IAM role and instance profile...
+Creating/checking role 'TpmAttestationRole' and instance profile 'TpmAttestationProfile'...
+IAM role and instance profile setup completed.
+Step 3: Creating KMS key...
+Creating KMS key with instance role 'arn:aws:iam::168635352862:role/TpmAttestationRole' and admin role 'arn:aws:sts::168635352862:assumed-role/x86dev-RemoteDevStack-x86devDevInstanceRole7B48C4B6-cIQj3seitrHz/i-0dd76c7d36b5ddd65'...
+KMS key created successfully. Key ID: 24a12bc2-ee28-43e5-9e25-98fda493b761
+Step 4: Creating symmetric key and user data...
+Symmetric key and user data created successfully.
+Step 5: Creating EBS volume...
+Creating blank EBS volume in availability zone 'us-west-1b'...
+EBS volume created successfully. Volume ID: vol-04e625a0c99e8094e
+Step 6: Launching EC2 instance...
+EC2 instance launched successfully.
+Deployment process completed successfully.
+Summary:
+  - AMI ID: ami-0be0e3f8833ab104b
+  - IAM Role: TpmAttestationRole
+  - Instance Profile: TpmAttestationProfile
+  - KMS Key ID: 24a12bc2-ee28-43e5-9e25-98fda493b761
+  - EBS Volume ID: vol-04e625a0c99e8094e
+  - Artifacts: /data/projects/attestable_ami/nitrotpm-attestation-samples/nix/examples/postgres-kms/scripts/../artifacts/
+  - EC2 Instance ID: i-0c9f2368a7e245bbc
+i-0c9f2368a7e245bbc
+  - EC2 Public IP: 18.144.87.190
+  - Security Group ID: sg-0d541d7620e1adecc
+Resource IDs have been saved to /data/projects/attestable_ami/nitrotpm-attestation-samples/nix/examples/postgres-kms/scripts/../artifacts/resources.json
+You can test PostgreSQL connectivity by running: ./test.sh --server 18.144.87.190
