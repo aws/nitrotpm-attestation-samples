@@ -16,11 +16,15 @@ Before you begin, ensure you have the following:
 
 ## Important Note on Secure Boot and Reproducibility
 
-When using secure boot enabled builds (e.g., `raw-image-secure-boot`), the builds are **NOT reproducible** because this example generates cryptographic keys at build time. Each build will produce different keys and therefore different measurements for PCR7.
+Secure boot signing is a **post-build step** performed outside of the nix derivation. This keeps private signing keys (`db.key`) out of the nix store and cache.
 
-In production scenarios, you should use consistent key material across builds to maintain reproducible measurements.
+The build workflow is:
+1. `nix build .#raw-image` — produces an unsigned image and UKI
+2. `nix run .#sign-efi-image -- result/unsigned.efi /path/to/db.key /path/to/db.crt` — signs the UKI
+3. `nix run .#compute-pcrs -- signed.efi --PK PK.esl --KEK KEK.esl --db db.esl -o tpm_pcr.json` — computes PCR values including PCR7
+4. `nix run .#create-ami-secure-boot -- result/nixos-tee_1.raw` — registers AMI with UEFI secure boot data
 
-The non-secure-boot builds (`raw-image`) remain fully reproducible.
+In production, provide consistent pre-generated key material for reproducible measurements.
 
 ## Getting Started
 Follow these steps to set up and test the Attestable AMI:

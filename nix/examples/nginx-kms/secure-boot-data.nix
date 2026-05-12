@@ -69,6 +69,7 @@ in
 pkgs.runCommand "secure-boot-data" {} ''
   mkdir -p $out
 
+  # Export both public and private key material for signing workflows
   cp ${secureBootKeys}/db.key ${secureBootKeys}/db.crt ${secureBootKeys}/*.esl $out/
 '' // {
   inherit uefiVarStore;

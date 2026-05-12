@@ -22,7 +22,6 @@ done
 
 # Build the package name based on flags
 PACKAGE_NAME="raw-image"
-[ "$SECURE_BOOT" = true ] && PACKAGE_NAME="${PACKAGE_NAME}-secure-boot"
 [ "$DEBUG" = true ] && PACKAGE_NAME="${PACKAGE_NAME}-debug"
 
 echo "Running Nix UKI build for package: $PACKAGE_NAME"
@@ -39,6 +38,35 @@ echo "Nix UKI build completed successfully."
 if [ ! -d "result" ]; then
   echo "Error: 'result' folder not found"
   exit 1
+fi
+
+# If secure boot, generate keys and sign the image
+if [ "$SECURE_BOOT" = true ]; then
+  echo "Building secure boot key material..."
+  nix --extra-experimental-features nix-command --extra-experimental-features flakes build .#secure-boot-keys --out-link sb-keys
+
+  if [ $? -ne 0 ]; then
+    echo "Error: Failed to build secure boot keys"
+    exit 1
+  fi
+
+  DB_KEY="sb-keys/db.key"
+  DB_CRT="sb-keys/db.crt"
+
+  if [ ! -f "$DB_KEY" ] || [ ! -f "$DB_CRT" ]; then
+    echo "Error: db.key or db.crt not found in secure-boot-keys output"
+    exit 1
+  fi
+
+  echo "Signing EFI image for secure boot..."
+  nix --extra-experimental-features nix-command --extra-experimental-features flakes run .#sign-efi-image -- \
+    result/unsigned.efi "$DB_KEY" "$DB_CRT" signed.efi
+
+  if [ $? -ne 0 ]; then
+    echo "Error: Secure boot signing failed"
+    exit 1
+  fi
+  echo "Image signed for secure boot."
 fi
 
 echo "Creating UKI AMI..."
