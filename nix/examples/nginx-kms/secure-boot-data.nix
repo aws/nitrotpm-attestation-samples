@@ -69,7 +69,8 @@ in
 pkgs.runCommand "secure-boot-data" {} ''
   mkdir -p $out
 
-  cp ${secureBootKeys}/db.key ${secureBootKeys}/db.crt ${secureBootKeys}/*.esl $out/
+  # Only export public material - private keys stay out of the nix store
+  cp ${secureBootKeys}/db.crt ${secureBootKeys}/*.esl $out/
 '' // {
   inherit uefiVarStore;
 }
