@@ -1,0 +1,61 @@
+name: Nix CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v27
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+          install_url: https://releases.nixos.org/nix/nix-2.18.9/install
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      # Eval concrete attrs instead of `nix flake check`, which rejects the
+      # callPackage-injected override/overrideDerivation attrs as non-derivations.
+      - name: Evaluate root flake packages
+        run: |
+          nix eval ./nix#packages.x86_64-linux.kms-decrypt-app.drvPath --no-write-lock-file
+      - name: Evaluate root flake apps
+        run: |
+          for app in boot-uefi-qemu compute-pcrs create-ami generate-uefi-vars sign-efi-image; do
+            echo "== apps.$app =="
+            nix eval "./nix#apps.x86_64-linux.$app.program" --no-write-lock-file
+          done
+      - name: Evaluate nginx-kms packages
+        run: |
+          for pkg in raw-image raw-image-debug; do
+            echo "== packages.$pkg =="
+            nix eval "./nix/examples/nginx-kms#packages.x86_64-linux.$pkg.drvPath" --no-write-lock-file
+          done
+      # statix/deadnix report-only (non-gating).
+      - name: Lint with statix (report-only)
+        run: nix run nixpkgs#statix -- check nix/ || true
+      - name: Lint with deadnix (report-only)
+        run: nix run nixpkgs#deadnix -- nix/
+
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - ./nix#kms-decrypt-app
+          - ./nix/examples/nginx-kms#raw-image
+          - ./nix/examples/nginx-kms#raw-image-debug
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v27
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+          install_url: https://releases.nixos.org/nix/nix-2.18.9/install
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: Build ${{ matrix.target }}
+        run: nix build '${{ matrix.target }}' --no-write-lock-file
