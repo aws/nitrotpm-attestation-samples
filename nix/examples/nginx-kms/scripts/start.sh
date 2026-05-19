@@ -16,6 +16,7 @@ SECRET_MANAGER_FLAG=""
 SECRET_ARN=""
 SECRET_CERT_ARN=""
 SECRET_MANAGER_INTERACTIVE=""
+NON_INTERACTIVE=false
 while [[ $# -gt 0 ]]; do
   case $1 in
     --secure-boot)
@@ -24,6 +25,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --debug)
       DEBUG_FLAG="--debug"
+      shift
+      ;;
+    --non-interactive|--yes|-y)
+      NON_INTERACTIVE=true
       shift
       ;;
     --secrets-manager)
@@ -55,7 +60,12 @@ fi
 generate_and_upload_keys() {
   echo ""
   echo "No Secret ARN provided. Would you like to generate a new signing key hierarchy and upload it to AWS Secrets Manager?"
-  read -r -p "Generate and upload keys? (yes/no): " CONFIRM
+  if [ "$NON_INTERACTIVE" = true ]; then
+    echo "Non-interactive mode: generating and uploading keys."
+    CONFIRM="yes"
+  else
+    read -r -p "Generate and upload keys? (yes/no): " CONFIRM
+  fi
 
   if [[ "$CONFIRM" != "yes" ]]; then
     echo "Key generation declined. Please provide an existing Secret ARN:"
@@ -164,7 +174,12 @@ if [ -f "$RESOURCES_FILE" ] && [ "$(jq 'length' "$RESOURCES_FILE" 2>/dev/null)" 
   echo "WARNING: A resources file already exists at: $RESOURCES_FILE"
   echo "This may indicate a previous deployment that was not cleaned up."
   echo ""
-  read -r -p "Would you like to run cleanup first? (yes/no/abort): " RESPONSE
+  if [ "$NON_INTERACTIVE" = true ]; then
+    echo "Non-interactive mode: overwriting existing resources file."
+    RESPONSE="no"
+  else
+    read -r -p "Would you like to run cleanup first? (yes/no/abort): " RESPONSE
+  fi
   case "$RESPONSE" in
     yes)
       echo "Running cleanup..."
@@ -271,7 +286,12 @@ if [ -n "$SECRET_MANAGER_INTERACTIVE" ]; then
       echo "Found retained signing keys from a previous deployment:"
       echo "  Key:  $RETAINED_SECRET_ARN"
       echo "  Cert: $RETAINED_CERT_ARN"
-      read -r -p "Use these retained keys? (yes/no): " USE_RETAINED
+      if [ "$NON_INTERACTIVE" = true ]; then
+        echo "Non-interactive mode: reusing retained keys."
+        USE_RETAINED="yes"
+      else
+        read -r -p "Use these retained keys? (yes/no): " USE_RETAINED
+      fi
       if [[ "$USE_RETAINED" == "yes" ]]; then
         SECRET_ARN="$RETAINED_SECRET_ARN"
         SECRET_CERT_ARN="$RETAINED_CERT_ARN"

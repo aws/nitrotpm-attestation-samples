@@ -1,5 +1,29 @@
 #!/bin/bash
 
+NON_INTERACTIVE=false
+DELETE_SECRETS_FORCE=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --non-interactive|--yes|-y)
+      NON_INTERACTIVE=true
+      shift
+      ;;
+    --delete-secrets)
+      DELETE_SECRETS_FORCE="yes"
+      shift
+      ;;
+    --retain-secrets)
+      DELETE_SECRETS_FORCE="no"
+      shift
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      echo "Usage: $0 [--non-interactive] [--delete-secrets|--retain-secrets]" >&2
+      exit 1
+      ;;
+  esac
+done
+
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 ARTIFACTS_DIR="$SCRIPT_DIR/../artifacts"
 RESOURCES_FILE="$ARTIFACTS_DIR/resources.json"
@@ -58,7 +82,15 @@ if [ -n "$SECRET_ARN" ] || [ -n "$SECRET_CERT_ARN" ]; then
   echo "Secrets Manager secrets found:"
   [ -n "$SECRET_ARN" ] && echo "  Key:  $SECRET_ARN"
   [ -n "$SECRET_CERT_ARN" ] && echo "  Cert: $SECRET_CERT_ARN"
-  read -r -p "Delete these secrets, do not reuse? (yes/no): " DELETE_SECRETS
+  if [ -n "$DELETE_SECRETS_FORCE" ]; then
+    DELETE_SECRETS="$DELETE_SECRETS_FORCE"
+    echo "Forced answer (--delete-secrets/--retain-secrets): $DELETE_SECRETS"
+  elif [ "$NON_INTERACTIVE" = true ]; then
+    DELETE_SECRETS="no"
+    echo "Non-interactive mode: retaining secrets (default)."
+  else
+    read -r -p "Delete these secrets, do not reuse? (yes/no): " DELETE_SECRETS
+  fi
 
   if [[ "$DELETE_SECRETS" == "yes" ]]; then
     if [ -n "$SECRET_ARN" ]; then
