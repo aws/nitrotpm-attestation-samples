@@ -81,16 +81,47 @@ Then the image can be built with:
 nix build .#raw-image
 ```
 
-We also provide additional tools to streamline the AMI creation process:
+The `tee-image` function produces an unsigned image with baseline TPM PCR4 measurements and an exported `unsigned.efi` UKI binary. Secure boot signing is an optional post-build step that keeps private keys out of the nix store.
+
+We also provide additional tools to streamline the AMI creation and signing process:
 
 * `create-ami`: A Nix Flake app for uploading the RAW image as an EC2 AMI. It uses the [EBS direct API](https://docs.aws.amazon.com/ebs/latest/userguide/ebs-accessing-snapshot.html) to create an EBS snapshot and then generates a new AMI without launching an instance. Usage:
 ```bash
 nix run .#create-ami -- result/nixos-tee_1.raw
 ```
+* `sign-efi-image`: Signs the unsigned UKI with secure boot keys provided as file paths (not in the nix store), patches the signed UKI into the ESP partition of the writable raw image, and emits a `uefi_data.aws` UEFI variable store for AMI registration. Use this after building to add secure boot signatures without exposing `db.key` in the nix cache. `<image-dir>` is the output of `nix build .#raw-image` (containing `unsigned.efi`, the `*.raw` image, and `repart-output.json`) copied to a writable location; `<keys-dir>` contains `db.key`, `db.crt`, `PK.esl`, `KEK.esl`, and `db.esl`. Usage:
+```bash
+nix run .#sign-efi-image -- <image-dir> <keys-dir>
+```
+* `compute-pcrs`: Computes TPM PCR values for an EFI image. When secure boot ESL files are provided, PCR7 measurements are included alongside PCR4. Usage:
+```bash
+nix run .#compute-pcrs -- signed.efi --PK PK.esl --KEK KEK.esl --db db.esl -o tpm_pcr.json
+```
 * `boot-uefi-qemu`: A debugging tool that uses QEMU to load the RAW image with a software-emulated TPM. Note that this environment cannot start the full attestation flow. Usage:
 ```bash
 nix run .#boot-uefi-qemu -- result/nixos-tee_1.raw
 ```
+
+### Secure Boot Workflow
+
+For workloads requiring secure boot, the signing pipeline runs outside of nix:
+
+```bash
+# 1. Build unsigned image (produces result/unsigned.efi and result/tpm_pcr.json
+#    with PCR4 only — PCR7 is added later by compute-pcrs)
+nix build .#raw-image
+
+# 2. Sign the UKI with your secure boot db key (in a secure environment)
+nix run .#sign-efi-image -- <image-dir> <keys-dir>
+
+# 3. Compute full PCR values including PCR7 secure boot measurements
+nix run .#compute-pcrs -- signed.efi --PK PK.esl --KEK KEK.esl --db db.esl -o tpm_pcr.json
+
+# 4. Create AMI with UEFI secure boot variable store
+nix run .#create-ami -- result/nixos-tee_1.raw result/uefi_data.aws
+```
+
+This separation ensures private signing keys never enter the nix store or cache, while builds remain fully reproducible (same source always produces the same unsigned image and PCR4 values).
 
 ## Nix Web Server Example
 

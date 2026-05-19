@@ -12,7 +12,6 @@
           pkgs = nixpkgs.legacyPackages."${system}";
           fcgiScript = pkgs.callPackage ./fcgi-script.nix { };
           kmsInitScript = pkgs.callPackage ./kms-init.nix { inherit nitro-tee; };
-          secureBootData = pkgs.callPackage ./secure-boot-data.nix { };
 
           # Common configuration shared between production and debug builds
           commonUserConfig = { config, pkgs, lib, ... }: {
@@ -128,17 +127,12 @@
         in
         {
           packages = {
-            # Production build (default)
+            # Production build (default). Produces an unsigned image; secure
+            # boot signing is a post-build step (see sign-efi-image).
 
             raw-image = nitro-tee.lib.${system}.tee-image {
               userConfig = commonUserConfig;
               isDebug = false;
-            };
-
-            raw-image-secure-boot = nitro-tee.lib.${system}.tee-image {
-              userConfig = commonUserConfig;
-              isDebug = false;
-              secureBootData = secureBootData;
             };
 
             # Debug build with console access enabled
@@ -148,22 +142,30 @@
               userConfig = commonUserConfig;
               isDebug = true;
             };
-
-            raw-image-secure-boot-debug = nitro-tee.lib.${system}.tee-image {
-              userConfig = commonUserConfig;
-              isDebug = true;
-              secureBootData = secureBootData;
-            };
           };
 
-          # Expose the apps from nitro-tee
           apps = {
             boot-uefi-qemu = nitro-tee.apps.${system}.boot-uefi-qemu;
             create-ami = nitro-tee.apps.${system}.create-ami;
-            create-ami-secure-boot = {
+            sign-efi-image = nitro-tee.apps.${system}.sign-efi-image;
+            compute-pcrs = nitro-tee.apps.${system}.compute-pcrs;
+
+            generate-uefi-vars = let
+              python-uefivars = pkgs.fetchFromGitHub {
+                owner = "awslabs";
+                repo = "python-uefivars";
+                rev = "main";
+                sha256 = "sha256-HzaKFyKMqEADPvydCdD29P9nC7Qwq/UYvgZYCx4oEhw=";
+              };
+              pythonEnv = pkgs.python3.withPackages (ps: with ps; [ google-crc32c ]);
+            in {
               type = "app";
-              program = "${pkgs.writeShellScript "create-ami-secure-boot" ''
-                ${nitro-tee.apps.${system}.create-ami.program} "$1" "${secureBootData.uefiVarStore}/uefi_data.aws"
+              program = "${pkgs.writeShellScript "generate-uefi-vars" ''
+                if [ "$#" -lt 4 ]; then
+                  echo "Usage: generate-uefi-vars -P <PK.esl> -K <KEK.esl> --db <db.esl> -O <output.aws>"
+                  exit 1
+                fi
+                ${pythonEnv}/bin/python3 ${python-uefivars}/uefivars -i none -o aws "$@"
               ''}";
             };
           };
