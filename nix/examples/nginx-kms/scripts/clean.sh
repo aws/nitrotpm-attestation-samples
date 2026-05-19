@@ -26,9 +26,12 @@ INSTANCE_PROFILE_NAME=$(jq -r '.INSTANCE_PROFILE_NAME // empty' "$RESOURCES_FILE
 KMS_KEY_ID=$(jq -r '.KMS_KEY_ID // empty' "$RESOURCES_FILE")
 INSTANCE_ID=$(jq -r '.INSTANCE_ID // empty' "$RESOURCES_FILE")
 SECURITY_GROUP_ID=$(jq -r '.SECURITY_GROUP_ID // empty' "$RESOURCES_FILE")
+SECRET_ARN=$(jq -r '.SECRET_ARN // empty' "$RESOURCES_FILE")
+SECRET_CERT_ARN=$(jq -r '.SECRET_CERT_ARN // empty' "$RESOURCES_FILE")
 
 # Track cleanup success
 CLEANUP_SUCCESS=true
+SECRETS_RETAINED=false
 
 # Function to run AWS CLI commands with error handling
 run_aws_command() {
@@ -48,6 +51,48 @@ run_aws_command_optional() {
     return 1
   fi
 }
+
+# Delete Secrets Manager secrets
+if [ -n "$SECRET_ARN" ] || [ -n "$SECRET_CERT_ARN" ]; then
+  echo ""
+  echo "Secrets Manager secrets found:"
+  [ -n "$SECRET_ARN" ] && echo "  Key:  $SECRET_ARN"
+  [ -n "$SECRET_CERT_ARN" ] && echo "  Cert: $SECRET_CERT_ARN"
+  read -r -p "Delete these secrets, do not reuse? (yes/no): " DELETE_SECRETS
+
+  if [[ "$DELETE_SECRETS" == "yes" ]]; then
+    if [ -n "$SECRET_ARN" ]; then
+      echo "Deleting Secrets Manager secret: $SECRET_ARN"
+      if ! output=$(aws secretsmanager delete-secret --secret-id "$SECRET_ARN" --force-delete-without-recovery 2>&1); then
+        if echo "$output" | grep -q "ResourceNotFoundException"; then
+          echo "Secret already deleted: $SECRET_ARN"
+        else
+          echo "Error deleting secret: $SECRET_ARN"
+          echo "Output: $output"
+          CLEANUP_SUCCESS=false
+        fi
+      fi
+    fi
+
+    if [ -n "$SECRET_CERT_ARN" ]; then
+      echo "Deleting Secrets Manager secret: $SECRET_CERT_ARN"
+      if ! output=$(aws secretsmanager delete-secret --secret-id "$SECRET_CERT_ARN" --force-delete-without-recovery 2>&1); then
+        if echo "$output" | grep -q "ResourceNotFoundException"; then
+          echo "Secret already deleted: $SECRET_CERT_ARN"
+        else
+          echo "Error deleting secret: $SECRET_CERT_ARN"
+          echo "Output: $output"
+          CLEANUP_SUCCESS=false
+        fi
+      fi
+    fi
+    SECRETS_RETAINED=false
+  else
+    echo "Retaining Secrets Manager secrets."
+    echo "To reuse on next deployment: ./scripts/start.sh --secure-boot --secrets-manager $SECRET_ARN"
+    SECRETS_RETAINED=true
+  fi
+fi
 
 # Terminate EC2 instance
 if [ -n "$INSTANCE_ID" ]; then
@@ -111,8 +156,14 @@ fi
 # Only remove resource files if all cleanup operations succeeded
 if [ "$CLEANUP_SUCCESS" = true ]; then
   echo "Cleanup completed successfully. Note that some resources may take time to be fully deleted."
-  echo "Removing resource tracking files."
-  rm -rf "$ARTIFACTS_DIR"
+  if [ "$SECRETS_RETAINED" = true ]; then
+    # Preserve resources.json with only the retained secret ARNs
+    echo "Preserving resources file with retained secret ARNs."
+    jq '{SECRET_ARN, SECRET_CERT_ARN} | with_entries(select(.value != null))' "$RESOURCES_FILE" > tmp.json && mv tmp.json "$RESOURCES_FILE"
+  else
+    echo "Removing resource tracking files."
+    rm -rf "$ARTIFACTS_DIR"
+  fi
 else
   echo "WARNING: Some cleanup operations failed. Resource file preserved at: $RESOURCES_FILE"
   echo "Please check your AWS credentials and re-run the cleanup script."

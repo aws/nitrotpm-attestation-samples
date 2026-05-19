@@ -23,6 +23,11 @@ while [[ $# -gt 0 ]]; do
       DEBUG=true
       shift
       ;;
+    --secrets-manager|--secret-cert-arn)
+      # Accepted for backwards compatibility with start.sh; the actual
+      # Secrets Manager retrieval and key staging happens in start.sh.
+      shift 2
+      ;;
     *)
       echo "Unknown option $1"
       exit 1
