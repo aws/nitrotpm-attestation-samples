@@ -27,6 +27,49 @@ The build workflow is:
 
 In production, provide consistent pre-generated key material for reproducible measurements.
 
+## Using AWS Secrets Manager for Signing Keys
+
+The `--secrets-manager` flag enables storing and retrieving secure boot signing keys via AWS Secrets Manager. This keeps private keys (`db.key`) completely out of the nix store and build cache — key material exists on the local filesystem only temporarily during the signing operation, then is immediately deleted.
+
+### Syntax
+
+```sh
+./scripts/start.sh --secure-boot --secrets-manager [SECRET_ARN]
+```
+
+The `--secrets-manager` flag **requires** `--secure-boot`. The script exits with an error if `--secure-boot` is not provided.
+
+### First-Time Deployment (No ARN)
+
+When no `SECRET_ARN` is provided, the script enters interactive mode:
+
+```sh
+./scripts/start.sh --secure-boot --secrets-manager
+```
+
+In this mode the script:
+1. Prompts you to confirm generation of a new signing key hierarchy
+2. Generates PK, KEK, and db keys using OpenSSL
+3. Uploads `db.key` and `db.crt` to AWS Secrets Manager
+4. Saves the resulting `SECRET_ARN` to `artifacts/resources.json`
+5. Deletes the local key files
+
+### Subsequent Deployments (With ARN)
+
+For subsequent deployments, provide the existing Secret ARN to retrieve the signing key from Secrets Manager:
+
+```sh
+./scripts/start.sh --secure-boot --secrets-manager arn:aws:secretsmanager:REGION:ACCOUNT:secret:NAME
+```
+
+In this mode the script retrieves the signing key and certificate from the existing secret and uses them for signing.
+
+The `SECRET_ARN` for subsequent deployments can be found in `artifacts/resources.json` under the key `SECRET_ARN`.
+
+### Security Benefit
+
+When `--secrets-manager` is active, private keys never enter the nix store. The signing key is retrieved from Secrets Manager, written to a temporary file with restrictive permissions (`0600`), used for the signing operation, and immediately deleted afterward. This prevents key material from leaking through nix store inspection or binary caches.
+
 ## Getting Started
 Follow these steps to set up and test the Attestable AMI:
 
@@ -87,6 +130,7 @@ Run the following script to build the Attestable image and set up the necessary 
 | Flag | Description |
 |------|-------------|
 | `--secure-boot` | Enable UEFI secure boot signing for the image |
+| `--secrets-manager [ARN]` | Store/retrieve signing keys via AWS Secrets Manager (requires `--secure-boot`) |
 | `--debug` | Build in debug mode with operator access enabled |
 
 **Examples:**
@@ -96,6 +140,12 @@ Run the following script to build the Attestable image and set up the necessary 
 
 # Secure boot with nix-managed keys
 ./scripts/start.sh --secure-boot
+
+# Secure boot with Secrets Manager (first time, generates keys)
+./scripts/start.sh --secure-boot --secrets-manager
+
+# Secure boot with existing Secrets Manager key
+./scripts/start.sh --secure-boot --secrets-manager arn:aws:secretsmanager:REGION:ACCOUNT:secret:NAME
 ```
 
 This script performs the following actions:
@@ -125,3 +175,17 @@ To remove all created resources, run:
 ./scripts/clean.sh
 ```
 
+## Secrets Manager Integration
+
+### Required IAM Permissions for Secrets Manager
+
+The following IAM permissions are only needed when the `--secrets-manager` flag is used with `start.sh`:
+
+| Permission | When Required |
+|------------|--------------|
+| `secretsmanager:CreateSecret` | When using `--secrets-manager` without an existing ARN (interactive key generation mode) |
+| `secretsmanager:PutSecretValue` | When uploading key material to Secrets Manager |
+| `secretsmanager:GetSecretValue` | When using `--secrets-manager` to retrieve the signing key and certificate during AMI creation |
+| `secretsmanager:DeleteSecret` | When running `clean.sh` to delete secrets created during deployment |
+
+These permissions are **not required** for the standard workflow without `--secrets-manager`. They are only needed when opting into Secrets Manager-based key storage.
