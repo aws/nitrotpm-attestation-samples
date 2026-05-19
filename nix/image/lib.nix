@@ -6,36 +6,9 @@
   tee-pkgs,
   userConfig ? { },
   isDebug ? false,
-  secureBootData ? null,
   ...
 }:
 let
-
-    # Sign EFI binary with secure boot keys if secureBootData is provided
-    sign-efi = efiPath:
-        if secureBootData != null then
-            pkgs.runCommand "signed-efi" {
-                nativeBuildInputs = [ pkgs.sbsigntool ];
-            } ''
-                mkdir -p $out
-
-                # Verify required secure boot files exist
-                if [ ! -f "${secureBootData}/db.key" ]; then
-                    echo "ERROR: Secure boot signing key not found: ${secureBootData}/db.key"
-                    exit 1
-                fi
-                if [ ! -f "${secureBootData}/db.crt" ]; then
-                    echo "ERROR: Secure boot certificate not found: ${secureBootData}/db.crt"
-                    exit 1
-                fi
-
-                # Sign the EFI binary using the signature database (db) key
-                sbsign --key ${secureBootData}/db.key \
-                       --cert ${secureBootData}/db.crt \
-                       --output $out/signed.efi \
-                       ${efiPath}
-            ''
-        else null;
 
     tee-config = {
         environment = {
@@ -54,6 +27,10 @@ let
     efiFileName = "BOOT${if arch == "aarch64" then "aa64" else "x64"}.EFI";
     ukiPath = "/EFI/BOOT/${efiFileName}";
 
+    # The image builder produces an unsigned image and exports the unsigned UKI
+    # plus a baseline tpm_pcr.json (PCR4 only). Secure boot signing happens at
+    # runtime via the sign-efi-image flake app so private keys never enter the
+    # nix store. See nix/README.md for the full workflow.
     raw-image = (nixos-generators.nixosGenerate {
         inherit system;
         modules = [
@@ -74,31 +51,19 @@ let
     }).overrideAttrs
         (oldAttrs: let
             originalEfiPath = oldAttrs.finalPartitions."00-esp".contents."${ukiPath}".source;
-            signedEfiDrv = sign-efi originalEfiPath;
-            finalEfiPath = if signedEfiDrv != null then "${signedEfiDrv}/signed.efi" else originalEfiPath;
         in {
-            finalPartitions = lib.recursiveUpdate oldAttrs.finalPartitions {
-                "00-esp".contents = {
-                    "${ukiPath}".source = finalEfiPath;
-                };
-            };
+            postInstall = ''
+                # Compute baseline TPM PCR values (PCR4 UKI measurement only).
+                # PCR7 is explicitly dropped via `jq 'del(.Measurements.PCR7)'`
+                # because it cannot be derived without the secure-boot key
+                # hierarchy, which is supplied externally to sign-efi-image /
+                # compute-pcrs. The `del` filter is idempotent (succeeds
+                # whether or not PCR7 is present in the input).
+                ${pkgs.nitrotpm-tools}/bin/nitro-tpm-pcr-compute --image ${originalEfiPath} \
+                    | ${pkgs.jq}/bin/jq 'del(.Measurements.PCR7)' > $out/tpm_pcr.json
 
-            postInstall = let
-                # Build secure boot arguments for PCR7 computation
-                secureBootArgs = lib.optionals (secureBootData != null) (
-                    lib.optional (builtins.pathExists "${secureBootData}/PK.esl") "--PK ${secureBootData}/PK.esl" ++
-                    lib.optional (builtins.pathExists "${secureBootData}/KEK.esl") "--KEK ${secureBootData}/KEK.esl" ++
-                    lib.optional (builtins.pathExists "${secureBootData}/db.esl") "--db ${secureBootData}/db.esl" ++
-                    lib.optional (builtins.pathExists "${secureBootData}/dbx.esl") "--dbx ${secureBootData}/dbx.esl"
-                );
-            in ''
-                # Compute TPM PCR values including secure boot measurements
-                ${pkgs.nitrotpm-tools}/bin/nitro-tpm-pcr-compute --image ${finalEfiPath} ${lib.concatStringsSep " " secureBootArgs} > $out/tpm_pcr.json
-
-                ${lib.optionalString (secureBootData != null) ''
-                    # Verify the EFI binary signature for secure boot compliance
-                    ${pkgs.sbsigntool}/bin/sbverify --cert ${secureBootData}/db.crt "${finalEfiPath}"
-                ''}
+                # Export the unsigned UKI for downstream signing.
+                cp ${originalEfiPath} $out/unsigned.efi
             '';
         });
 in pkgs.stdenv.mkDerivation {

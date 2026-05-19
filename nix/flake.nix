@@ -21,10 +21,13 @@
             packages = pkgs.callPackage ./tee/packages.nix { };
 
             lib = {
-              # Lib function to build a raw TEE image
-              tee-image = { userConfig ? { }, isDebug ? false, secureBootData ? null } :
+              # Lib function to build a raw TEE image. Produces an unsigned
+              # image; secure boot signing is a separate post-build step
+              # (see nix/utils/sign-efi-image.nix) so private keys never
+              # enter the nix store.
+              tee-image = { userConfig ? { }, isDebug ? false } :
                 pkgs.callPackage ./image/lib.nix {
-                  inherit nixos-generators userConfig isDebug secureBootData;
+                  inherit nixos-generators userConfig isDebug;
                   tee-pkgs = packages;
                 };
             };
@@ -35,6 +38,10 @@
               boot-uefi-qemu = pkgs.callPackage ./utils/boot-uefi-qemu.nix { };
               # Create an AMI from the raw image input
               create-ami = pkgs.callPackage ./utils/create-ami.nix { };
+              # Sign an unsigned EFI binary with secure boot keys
+              sign-efi-image = pkgs.callPackage ./utils/sign-efi-image.nix { };
+              # Compute TPM PCR values from an EFI image
+              compute-pcrs = pkgs.callPackage ./utils/compute-pcrs.nix { };
             };
           }
       );
