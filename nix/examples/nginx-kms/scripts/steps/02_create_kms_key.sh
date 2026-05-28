@@ -136,6 +136,15 @@ if [ -z "$PCR_VALUES" ]; then
   exit 1
 fi
 
+# GHSA-xrv8-2pf5-f3q7 workaround: bind PCR12 (kernel command line) to the KMS
+# policy. Without it, an operator with UefiData modify rights can inject cmdline
+# overrides while keeping PCR4 unchanged. The unmodified-cmdline measurement is
+# the zero SHA-384.
+PCR12_ZERO="000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+if ! echo "$PCR_VALUES" | grep -q "NitroTPMPCR12"; then
+  PCR_VALUES="${PCR_VALUES}, \"kms:RecipientAttestation:NitroTPMPCR12\": \"${PCR12_ZERO}\""
+fi
+
 KEY_POLICY=$(cat <<EOF
 {
   "Version": "2012-10-17",

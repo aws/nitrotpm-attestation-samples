@@ -31,6 +31,8 @@ To ensure integrity, the Nix store is verified using [`dm-verity`](https://docs.
 
 The UKI binary is measured by the UEFI stage, with the measurement stored in TPM PCR4. This measurement is key to the integrity of the entire AMI and can be used in KMS key policies for decrypting secrets. Any change to system components (sample apps or NixOS config) will alter the `dm-verity` root-hash, which is passed in the UKI command line and ultimately reflected in the TPM PCR4 measurement.
 
+> **Security note (GHSA-xrv8-2pf5-f3q7):** When secure boot is disabled, systemd-boot may append externally-provided kernel command line data on top of the UKI's embedded cmdline. PCR4 does not cover that overlay — PCR12 does. KMS policies that protect attestable AMIs **must** bind `kms:RecipientAttestation:NitroTPMPCR12` (the unmodified-cmdline measurement is the all-zero SHA-384), or alternatively enable secure boot and bind PCR7. The `nginx-kms` example does this automatically. The flake also asserts that `nitrotpm-tools >= 1.1.0` (the version that emits PCR12 in `nitro-tpm-pcr-compute` output).
+
 ### Getting started
 
 To build Nix based Attestable AMIs, we provide a [Nix Flake](flake.nix). This flake exposes several [binary packages](tee/packages.nix) that can be used within your own NixOS configuration:
