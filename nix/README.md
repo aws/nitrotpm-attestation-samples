@@ -99,6 +99,10 @@ nix run .#sign-efi-image -- <image-dir> <keys-dir>
 ```bash
 nix run .#compute-pcrs -- signed.efi --PK PK.esl --KEK KEK.esl --db db.esl -o tpm_pcr.json
 ```
+* `generate-uefi-vars`: Generates an AWS UEFI variable store (`uefi_data.aws`) from secure boot ESL files for AMI registration. Usage:
+```bash
+nix run .#generate-uefi-vars -- -P PK.esl -K KEK.esl --db db.esl -O uefi_data.aws
+```
 * `boot-uefi-qemu`: A debugging tool that uses QEMU to load the RAW image with a software-emulated TPM. Note that this environment cannot start the full attestation flow. Usage:
 ```bash
 nix run .#boot-uefi-qemu -- result/nixos-tee_1.raw

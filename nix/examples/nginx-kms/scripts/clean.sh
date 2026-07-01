@@ -12,13 +12,9 @@ while [[ $# -gt 0 ]]; do
       DELETE_SECRETS_FORCE="yes"
       shift
       ;;
-    --retain-secrets)
-      DELETE_SECRETS_FORCE="no"
-      shift
-      ;;
     *)
       echo "Unknown option: $1" >&2
-      echo "Usage: $0 [--non-interactive] [--delete-secrets|--retain-secrets]" >&2
+      echo "Usage: $0 [--non-interactive] [--delete-secrets]" >&2
       exit 1
       ;;
   esac
@@ -84,7 +80,7 @@ if [ -n "$SECRET_ARN" ] || [ -n "$SECRET_CERT_ARN" ]; then
   [ -n "$SECRET_CERT_ARN" ] && echo "  Cert: $SECRET_CERT_ARN"
   if [ -n "$DELETE_SECRETS_FORCE" ]; then
     DELETE_SECRETS="$DELETE_SECRETS_FORCE"
-    echo "Forced answer (--delete-secrets/--retain-secrets): $DELETE_SECRETS"
+    echo "Forced answer (--delete-secrets): $DELETE_SECRETS"
   elif [ "$NON_INTERACTIVE" = true ]; then
     DELETE_SECRETS="no"
     echo "Non-interactive mode: retaining secrets (default)."

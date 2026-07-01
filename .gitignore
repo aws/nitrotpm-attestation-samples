@@ -7,5 +7,4 @@
 **/signed.efi
 **/tpm_pcr.json
 **/tmp.json
-**/resources copy.json
 **/*.bak

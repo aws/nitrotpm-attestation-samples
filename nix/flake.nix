@@ -55,6 +55,8 @@
               sign-efi-image = pkgs.callPackage ./utils/sign-efi-image.nix { };
               # Compute TPM PCR values from an EFI image
               compute-pcrs = pkgs.callPackage ./utils/compute-pcrs.nix { };
+              # Generate an AWS UEFI variable store from secure boot ESL files
+              generate-uefi-vars = pkgs.callPackage ./utils/generate-uefi-vars.nix { };
             };
           }
       );
