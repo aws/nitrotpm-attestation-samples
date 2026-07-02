@@ -98,11 +98,12 @@ if [ "$SECURE_BOOT" = true ]; then
   # Compute PCR values (PCR4 + PCR7) against the signed image.
   echo "Computing PCR values for signed UKI..."
   nix --extra-experimental-features nix-command --extra-experimental-features flakes \
-    run .#compute-pcrs -- "$WORK_DIR/signed.efi" \
+    run .#compute-pcrs -- \
+    --image "$WORK_DIR/signed.efi" \
     --PK "$PROJECT_DIR/sb-keys/PK.esl" \
     --KEK "$PROJECT_DIR/sb-keys/KEK.esl" \
     --db "$PROJECT_DIR/sb-keys/db.esl" \
-    -o "$WORK_DIR/tpm_pcr.json"
+    > "$WORK_DIR/tpm_pcr.json"
 
   if [ $? -ne 0 ]; then
     echo "Error: PCR computation failed"

@@ -53,8 +53,13 @@
               create-ami = pkgs.callPackage ./utils/create-ami.nix { };
               # Sign an unsigned EFI binary with secure boot keys
               sign-efi-image = pkgs.callPackage ./utils/sign-efi-image.nix { };
-              # Compute TPM PCR values from an EFI image
-              compute-pcrs = pkgs.callPackage ./utils/compute-pcrs.nix { };
+              # Compute TPM PCR values from an EFI image. Exposes the upstream
+              # nitro-tpm-pcr-compute directly (no wrapper); pass --image and
+              # optional --PK/--KEK/--db/--dbx, redirect stdout for output.
+              compute-pcrs = {
+                type = "app";
+                program = "${pkgs.nitrotpm-tools}/bin/nitro-tpm-pcr-compute";
+              };
               # Generate an AWS UEFI variable store from secure boot ESL files
               generate-uefi-vars = pkgs.callPackage ./utils/generate-uefi-vars.nix { };
             };

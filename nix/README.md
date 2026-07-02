@@ -95,9 +95,9 @@ nix run .#create-ami -- result/nixos-tee_1.raw
 ```bash
 nix run .#sign-efi-image -- <image-dir> <keys-dir>
 ```
-* `compute-pcrs`: Computes TPM PCR values for an EFI image. When secure boot ESL files are provided, PCR7 measurements are included alongside PCR4. Usage:
+* `compute-pcrs`: Computes TPM PCR values for an EFI image (the upstream `nitro-tpm-pcr-compute` tool exposed directly). When secure boot ESL files are provided, PCR7 measurements are included alongside PCR4. Output goes to stdout; redirect to a file. Usage:
 ```bash
-nix run .#compute-pcrs -- signed.efi --PK PK.esl --KEK KEK.esl --db db.esl -o tpm_pcr.json
+nix run .#compute-pcrs -- --image signed.efi --PK PK.esl --KEK KEK.esl --db db.esl > tpm_pcr.json
 ```
 * `generate-uefi-vars`: Generates an AWS UEFI variable store (`uefi_data.aws`) from secure boot ESL files for AMI registration. Usage:
 ```bash
@@ -121,7 +121,7 @@ nix build .#raw-image
 nix run .#sign-efi-image -- <image-dir> <keys-dir>
 
 # 3. Compute full PCR values including PCR7 secure boot measurements
-nix run .#compute-pcrs -- signed.efi --PK PK.esl --KEK KEK.esl --db db.esl -o tpm_pcr.json
+nix run .#compute-pcrs -- --image signed.efi --PK PK.esl --KEK KEK.esl --db db.esl > tpm_pcr.json
 
 # 4. Create AMI with UEFI secure boot variable store
 nix run .#create-ami -- result/nixos-tee_1.raw result/uefi_data.aws

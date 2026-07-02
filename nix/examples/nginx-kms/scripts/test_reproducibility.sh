@@ -141,11 +141,11 @@ sign_and_compute_pcrs() {
 
   nix --extra-experimental-features nix-command --extra-experimental-features flakes \
     run .#compute-pcrs -- \
-    "$image_dir/signed.efi" \
+    --image "$image_dir/signed.efi" \
     --PK "$keys_dir/PK.esl" \
     --KEK "$keys_dir/KEK.esl" \
     --db "$keys_dir/db.esl" \
-    -o "$image_dir/tpm_pcr.json" >/dev/null 2>&1
+    > "$image_dir/tpm_pcr.json" 2>/dev/null
 }
 
 # ------------------------------------------------------------------------

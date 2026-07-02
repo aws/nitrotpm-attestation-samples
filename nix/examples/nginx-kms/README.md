@@ -25,7 +25,7 @@ Secure boot signing is a **post-build step** performed outside of the nix deriva
 The build workflow is:
 1. `nix build .#raw-image` — produces an unsigned image and UKI
 2. `nix run .#sign-efi-image -- result/unsigned.efi /path/to/db.key /path/to/db.crt signed.efi` — signs the UKI
-3. `nix run .#compute-pcrs -- signed.efi --PK PK.esl --KEK KEK.esl --db db.esl -o tpm_pcr.json` — computes PCR values including PCR7
+3. `nix run .#compute-pcrs -- --image signed.efi --PK PK.esl --KEK KEK.esl --db db.esl > tpm_pcr.json` — computes PCR values including PCR7
 4. `nix run .#generate-uefi-vars -- -P PK.esl -K KEK.esl --db db.esl -O uefi_data.aws` — generates the UEFI variable store
 5. `nix run .#create-ami -- result/nixos-tee_1.raw uefi_data.aws` — registers AMI with UEFI secure boot data
 
