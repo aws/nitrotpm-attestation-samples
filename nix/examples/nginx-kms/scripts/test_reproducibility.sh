@@ -15,7 +15,7 @@
 # stable across all runs as long as the unsigned UKI is unchanged.
 #
 # Does NOT call AWS. Exercises only the build/sign/PCR-compute phases
-# via the flake apps (sign-efi-image, compute-pcrs).
+# via the flake apps (sign-efi-image computes the PCRs it prints).
 #
 # Usage: ./scripts/test_reproducibility.sh
 
@@ -136,15 +136,10 @@ sign_and_compute_pcrs() {
   local image_dir="$1"
   local keys_dir="$2"
 
+  # sign-efi-image also computes the PCR set and prints it to stdout;
+  # progress goes to stderr, so redirect stdout into tpm_pcr.json.
   nix --extra-experimental-features nix-command --extra-experimental-features flakes \
-    run .#sign-efi-image -- "$image_dir" "$keys_dir" >/dev/null 2>&1
-
-  nix --extra-experimental-features nix-command --extra-experimental-features flakes \
-    run .#compute-pcrs -- \
-    --image "$image_dir/signed.efi" \
-    --PK "$keys_dir/PK.esl" \
-    --KEK "$keys_dir/KEK.esl" \
-    --db "$keys_dir/db.esl" \
+    run .#sign-efi-image -- "$image_dir" "$keys_dir" \
     > "$image_dir/tpm_pcr.json" 2>/dev/null
 }
 

@@ -56,9 +56,10 @@ let
                 # Compute baseline TPM PCR values (PCR4 UKI measurement only).
                 # PCR7 is explicitly dropped via `jq 'del(.Measurements.PCR7)'`
                 # because it cannot be derived without the secure-boot key
-                # hierarchy, which is supplied externally to sign-efi-image /
-                # compute-pcrs. The `del` filter is idempotent (succeeds
-                # whether or not PCR7 is present in the input).
+                # hierarchy, which is supplied externally to sign-efi-image
+                # (which recomputes PCR4 + PCR7 for the signed image). The
+                # `del` filter is idempotent (succeeds whether or not PCR7 is
+                # present in the input).
                 ${pkgs.nitrotpm-tools}/bin/nitro-tpm-pcr-compute --image ${originalEfiPath} \
                     | ${pkgs.jq}/bin/jq 'del(.Measurements.PCR7)' > $out/tpm_pcr.json
 

@@ -87,26 +87,15 @@ if [ "$SECURE_BOOT" = true ]; then
   cp -r result/. "$WORK_DIR/"
   chmod -R u+w "$WORK_DIR"
 
+  # sign-efi-image signs the UKI, patches the ESP, builds the UEFI var
+  # store, and prints the full PCR set (PCR4 + PCR7) to stdout, which we
+  # capture into tpm_pcr.json.
   nix --extra-experimental-features nix-command --extra-experimental-features flakes \
-    run .#sign-efi-image -- "$WORK_DIR" "$PROJECT_DIR/sb-keys"
-
-  if [ $? -ne 0 ]; then
-    echo "Error: secure boot signing failed"
-    exit 1
-  fi
-
-  # Compute PCR values (PCR4 + PCR7) against the signed image.
-  echo "Computing PCR values for signed UKI..."
-  nix --extra-experimental-features nix-command --extra-experimental-features flakes \
-    run .#compute-pcrs -- \
-    --image "$WORK_DIR/signed.efi" \
-    --PK "$PROJECT_DIR/sb-keys/PK.esl" \
-    --KEK "$PROJECT_DIR/sb-keys/KEK.esl" \
-    --db "$PROJECT_DIR/sb-keys/db.esl" \
+    run .#sign-efi-image -- "$WORK_DIR" "$PROJECT_DIR/sb-keys" \
     > "$WORK_DIR/tpm_pcr.json"
 
   if [ $? -ne 0 ]; then
-    echo "Error: PCR computation failed"
+    echo "Error: secure boot signing / PCR computation failed"
     exit 1
   fi
 

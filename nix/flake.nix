@@ -51,11 +51,15 @@
               boot-uefi-qemu = pkgs.callPackage ./utils/boot-uefi-qemu.nix { };
               # Create an AMI from the raw image input
               create-ami = pkgs.callPackage ./utils/create-ami.nix { };
-              # Sign an unsigned EFI binary with secure boot keys
+              # Sign an unsigned EFI binary with secure boot keys. For the
+              # producer flow it also computes the full PCR set (PCR4 + PCR7)
+              # and prints the JSON to stdout, so no extra step is needed.
               sign-efi-image = pkgs.callPackage ./utils/sign-efi-image.nix { };
               # Compute TPM PCR values from an EFI image. Exposes the upstream
-              # nitro-tpm-pcr-compute directly (no wrapper); pass --image and
-              # optional --PK/--KEK/--db/--dbx, redirect stdout for output.
+              # nitro-tpm-pcr-compute directly for verifiers / relying parties
+              # who have a signed image + public ESLs but not the signing key
+              # (and thus cannot run sign-efi-image). Pass --image and optional
+              # --PK/--KEK/--db/--dbx; redirect stdout for output.
               compute-pcrs = {
                 type = "app";
                 program = "${pkgs.nitrotpm-tools}/bin/nitro-tpm-pcr-compute";
