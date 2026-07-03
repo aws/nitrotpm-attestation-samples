@@ -73,12 +73,11 @@ When no `SECRET_ARN` is provided, the script enters interactive mode:
 
 In this mode the script:
 1. Prompts you to confirm generation of a new signing identity
-2. Generates a fixed owner GUID and the PK, KEK, and db certificates using OpenSSL
-3. Uploads `db.key`, `db.crt`, and the identity bundle (`{guid, pk_crt, kek_crt}`) to AWS Secrets Manager
+2. Generates a fixed owner GUID and the PK, KEK, and db keys/certs with OpenSSL **entirely in memory** — no private key is written to disk. PK/KEK are self-signed with `openssl req -keyout /dev/null` (their private keys are discarded immediately); `db.key` is produced by `openssl genpkey` to stdout and kept only in a shell variable
+3. Streams `db.key`, `db.crt`, and the identity bundle (`{guid, pk_crt, kek_crt}`) into AWS Secrets Manager via process substitution (a pipe), so no file is created
 4. Saves the resulting `SECRET_ARN`, `SECRET_CERT_ARN`, and `IDENTITY_ARN` to `artifacts/resources.json`
-5. Deletes the local key files (the one-time generation directory)
 
-On subsequent deployments the private `db.key` is **not** re-downloaded to disk at all — it is streamed from Secrets Manager into `sbsign` in memory during signing.
+At no point during generation or upload is a private key written to the filesystem. On subsequent deployments the private `db.key` is likewise never downloaded to disk — it is streamed from Secrets Manager into `sbsign` in memory during signing.
 
 ### Subsequent Deployments (With ARN)
 

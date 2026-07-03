@@ -459,6 +459,87 @@ else
 fi
 echo
 
+# ==== Test 5: identity generation never writes a private key to disk ====
+echo "----------------------------------------------------"
+echo " Test 5: generate_identity_material (no key on disk)"
+echo "         EXPECT: valid db key/cert pair, zero *.key files"
+echo "----------------------------------------------------"
+
+# Source the real generation helper from start.sh so we exercise production
+# code, not a copy. start.sh runs top-level logic on source, so guard it: only
+# the function definitions are needed here. We extract just the function via a
+# marker-bounded sed so sourcing has no side effects.
+GEN_FN=$(sed -n '/^generate_identity_material() {/,/^}/p' "$SCRIPT_DIR/start.sh")
+if [ -z "$GEN_FN" ]; then
+  echo -e "${RED}FAIL${RESET} Test 5: could not extract generate_identity_material from start.sh"
+  FAIL_COUNT=$((FAIL_COUNT + 1))
+else
+  # Run generation under a sandbox dir used as TMPDIR + HOME, so any stray file
+  # (temp key, ~/.rnd, etc.) lands where we can detect it.
+  SANDBOX="$TEST_DIR/gen-sandbox"
+  rm -rf "$SANDBOX"; mkdir -p "$SANDBOX"
+  GEN_OUT="$TEST_DIR/gen-material.json"
+
+  eval "$GEN_FN"
+  ( export TMPDIR="$SANDBOX" HOME="$SANDBOX"; generate_identity_material ) > "$GEN_OUT" 2>/dev/null
+
+  # (a) material is complete and the db key/cert are a matching pair.
+  GEN_DB_KEY=$(jq -r '.db_key // empty' "$GEN_OUT" 2>/dev/null)
+  GEN_DB_CRT=$(jq -r '.db_crt // empty' "$GEN_OUT" 2>/dev/null)
+  GEN_GUID=$(jq -r '.guid // empty' "$GEN_OUT" 2>/dev/null)
+  if [ -n "$GEN_DB_KEY" ] && [ -n "$GEN_DB_CRT" ] && [ -n "$GEN_GUID" ]; then
+    KEY_PUB=$(printf '%s' "$GEN_DB_KEY" | nix --extra-experimental-features nix-command --extra-experimental-features flakes shell nixpkgs#openssl --command bash -c 'openssl pkey -pubout 2>/dev/null | openssl sha256')
+    CRT_PUB=$(printf '%s' "$GEN_DB_CRT" | nix --extra-experimental-features nix-command --extra-experimental-features flakes shell nixpkgs#openssl --command bash -c 'openssl x509 -noout -pubkey 2>/dev/null | openssl sha256')
+    if [ -n "$KEY_PUB" ] && [ "$KEY_PUB" = "$CRT_PUB" ]; then
+      echo -e "${GREEN}PASS${RESET} Test 5: db key/cert form a valid pair (guid $GEN_GUID)"
+      PASS_COUNT=$((PASS_COUNT + 1))
+    else
+      echo -e "${RED}FAIL${RESET} Test 5: db key/cert public keys do not match"
+      FAIL_COUNT=$((FAIL_COUNT + 1))
+    fi
+  else
+    echo -e "${RED}FAIL${RESET} Test 5: generation output missing guid/db_key/db_crt"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+  fi
+  unset GEN_DB_KEY
+
+  # (b) no private key is ever WRITTEN to disk during generation. A post-hoc
+  #     file scan is insufficient — the old code wrote keys to a temp dir and
+  #     rm-rf'd them, leaving nothing to find. The faithful check is at the
+  #     syscall level: trace file-creating opens and assert none targets a
+  #     private-key file. Requires ptrace (yama scope 0); skip the assertion
+  #     (do not fail) when unavailable. strace is provided via nix.
+  if [ "$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo 0)" = "0" ]; then
+    STRACE_LOG="$TEST_DIR/gen-strace.log"
+    export -f generate_identity_material
+    ( export TMPDIR="$SANDBOX" HOME="$SANDBOX"
+      nix --extra-experimental-features nix-command --extra-experimental-features flakes shell \
+        nixpkgs#strace --command bash -c \
+        "strace -f -y -e trace=openat -o '$STRACE_LOG' bash -c 'generate_identity_material >/dev/null'"
+    ) >/dev/null 2>&1 || true
+    # Opens with write/create intent, excluding the read-only nix store and
+    # kernel virtual filesystems; flag any path that looks like a private key.
+    # strace prints the path as the 2nd arg in quotes (relative paths like
+    # "db.key" appear verbatim, with the cwd shown separately as AT_FDCWD<...>).
+    # Extract the quoted path exactly (dropping both quotes), then match.
+    WROTE_KEYS=$(grep -E 'O_(WRONLY|RDWR|CREAT)' "$STRACE_LOG" 2>/dev/null \
+      | grep -oE ', "[^"]+", O_' | sed -E 's/^, "//; s/", O_$//' \
+      | grep -vE '^/(nix|proc|sys|dev|etc)/' \
+      | grep -iE '(\.key|private)' | sort -u)
+    if [ -z "$WROTE_KEYS" ]; then
+      echo -e "${GREEN}PASS${RESET} Test 5: no private-key file opened for writing during generation"
+      PASS_COUNT=$((PASS_COUNT + 1))
+    else
+      echo -e "${RED}FAIL${RESET} Test 5: generation wrote private-key file(s) to disk"
+      echo "$WROTE_KEYS" | sed 's/^/  /'
+      FAIL_COUNT=$((FAIL_COUNT + 1))
+    fi
+  else
+    echo -e "${YELLOW}SKIP${RESET} Test 5: no-disk syscall assertion (ptrace unavailable)"
+  fi
+fi
+echo
+
 # ==== Summary ====
 echo "===================================================="
 echo " Summary"

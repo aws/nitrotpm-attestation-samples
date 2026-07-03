@@ -57,6 +57,46 @@ if [ -n "$SECRET_MANAGER_FLAG" ] && [ -z "$SECURE_BOOT_FLAG" ]; then
   exit 1
 fi
 
+# Generate the secure boot golden identity entirely in memory and emit it as a
+# single JSON object on stdout: {guid, db_key, db_crt, pk_crt, kek_crt}. No
+# private key is ever written to the filesystem (PR #18 r3513902421):
+#
+#   * PK/KEK are self-signed with `openssl req -keyout /dev/null`, so their
+#     private keys are discarded the instant the cert is produced. They are
+#     unused afterward (uefivars '-i none' consumes ESLs, not .auth files).
+#   * db.key is generated with `openssl genpkey` to stdout, captured in a shell
+#     variable, and the matching cert is derived via `openssl req -key
+#     /dev/stdin`. The key never touches disk; it is marshalled out through jq.
+#
+# jq assembles the JSON inside the nix shell so the multi-line PEMs survive the
+# process boundary intact.
+generate_identity_material() {
+  nix --extra-experimental-features nix-command --extra-experimental-features flakes shell \
+    nixpkgs#openssl nixpkgs#util-linux nixpkgs#jq --command bash -c '
+    set -euo pipefail
+    guid=$(uuidgen --random)
+    pk_crt=$(openssl req -newkey rsa:4096 -nodes -keyout /dev/null -new -x509 -sha256 -days 3650 -subj "/CN=Platform key/" 2>/dev/null)
+    kek_crt=$(openssl req -newkey rsa:4096 -nodes -keyout /dev/null -new -x509 -sha256 -days 3650 -subj "/CN=Key Exchange Key/" 2>/dev/null)
+    db_key=$(openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 2>/dev/null)
+    db_crt=$(printf "%s" "$db_key" | openssl req -new -x509 -sha256 -days 3650 -subj "/CN=Signature Database key/" -key /dev/stdin 2>/dev/null)
+    jq -n --arg guid "$guid" --arg db_key "$db_key" --arg db_crt "$db_crt" \
+          --arg pk_crt "$pk_crt" --arg kek_crt "$kek_crt" \
+          "{guid: \$guid, db_key: \$db_key, db_crt: \$db_crt, pk_crt: \$pk_crt, kek_crt: \$kek_crt}"
+  '
+}
+
+# Create a Secrets Manager secret whose value is read from a file path. Intended
+# to be called with a process substitution (e.g. upload_secret NAME <(printf
+# '%s' "$PEM")) so the value streams from a pipe and is never written to a file.
+# Prints the new secret's ARN on stdout; returns non-zero on failure.
+upload_secret() {
+  local name="$1" src="$2"
+  aws secretsmanager create-secret \
+    --name "$name" \
+    --secret-string "file://$src" \
+    --query 'ARN' --output text
+}
+
 # Generate secure boot golden identity and upload to AWS Secrets Manager.
 #
 # For reproducible PCR7, the ENTIRE enrolled key set must be byte-stable
@@ -68,10 +108,12 @@ fi
 #   nitrotpm-sb-signing-cert-<ts> -> db.crt          (rebuilds db.esl)
 #   nitrotpm-sb-identity-<ts>     -> {guid,pk_crt,kek_crt}  (rebuilds PK/KEK.esl)
 #
-# PK.key / KEK.key are never persisted: the uefivars '-i none' model consumes
-# ESLs (not .auth files), so the PK/KEK private keys are unused after cert
-# generation. Regenerating the identity is a deliberate act that rolls PCR7
-# (the AWS revocation model), not an accidental per-run side effect.
+# No private key is ever written to disk: the material is generated in memory
+# (generate_identity_material) and streamed into Secrets Manager via process
+# substitution (upload_secret). PK.key / KEK.key are never persisted at all;
+# db.key lives only in a shell variable until it is uploaded, then unset.
+# Regenerating the identity is a deliberate act that rolls PCR7 (the AWS
+# revocation model), not an accidental per-run side effect.
 generate_and_upload_keys() {
   echo ""
   echo "No Secret ARN provided. Would you like to generate a new signing identity and upload it to AWS Secrets Manager?"
@@ -92,67 +134,58 @@ generate_and_upload_keys() {
 
   local TIMESTAMP
   TIMESTAMP=$(date +%s)
-  local KEY_DIR
-  KEY_DIR=$(mktemp -d)
 
-  # Generate a fixed owner GUID and the PK/KEK/db certificates. This is the
-  # canonical identity; the ESLs (and thus PCR7) are derived deterministically
-  # from these files. Run inside a nix shell so uuidgen is available.
-  nix --extra-experimental-features nix-command --extra-experimental-features flakes shell \
-    nixpkgs#openssl nixpkgs#util-linux --command bash -c "
-    cd '$KEY_DIR'
-    uuidgen --random > GUID.txt
-    openssl req -newkey rsa:4096 -nodes -keyout PK.key -new -x509 -sha256 -days 3650 -subj '/CN=Platform key/' -out PK.crt 2>/dev/null
-    openssl req -newkey rsa:4096 -nodes -keyout KEK.key -new -x509 -sha256 -days 3650 -subj '/CN=Key Exchange Key/' -out KEK.crt 2>/dev/null
-    openssl req -newkey rsa:4096 -nodes -keyout db.key -new -x509 -sha256 -days 3650 -subj '/CN=Signature Database key/' -out db.crt 2>/dev/null
-  "
-  if [ $? -ne 0 ]; then
+  # Generate the entire identity in memory. No private key is written to disk;
+  # the material is returned as a JSON object we unpack into shell variables.
+  local IDENTITY_MATERIAL
+  IDENTITY_MATERIAL=$(generate_identity_material)
+  if [ $? -ne 0 ] || [ -z "$IDENTITY_MATERIAL" ]; then
     echo "Error: Failed to generate secure boot identity"
-    rm -rf "$KEY_DIR"
+    exit 1
+  fi
+
+  local GUID DB_KEY DB_CRT PK_CRT KEK_CRT
+  GUID=$(printf '%s' "$IDENTITY_MATERIAL" | jq -r '.guid')
+  DB_KEY=$(printf '%s' "$IDENTITY_MATERIAL" | jq -r '.db_key')
+  DB_CRT=$(printf '%s' "$IDENTITY_MATERIAL" | jq -r '.db_crt')
+  PK_CRT=$(printf '%s' "$IDENTITY_MATERIAL" | jq -r '.pk_crt')
+  KEK_CRT=$(printf '%s' "$IDENTITY_MATERIAL" | jq -r '.kek_crt')
+  unset IDENTITY_MATERIAL
+
+  if [ -z "$GUID" ] || [ -z "$DB_KEY" ] || [ -z "$DB_CRT" ] || [ -z "$PK_CRT" ] || [ -z "$KEK_CRT" ]; then
+    echo "Error: generated identity material is incomplete"
+    unset DB_KEY
     exit 1
   fi
 
   echo "Golden identity generated successfully."
 
-  # Upload db.key to Secrets Manager
+  # Upload db.key to Secrets Manager. The private key is streamed from a process
+  # substitution (a pipe) into the upload helper, so it is never written to a
+  # file. It lives only in the DB_KEY variable, which we unset immediately after.
   echo "Uploading signing key to AWS Secrets Manager..."
   local KEY_SECRET_NAME="nitrotpm-sb-signing-key-${TIMESTAMP}"
-  local KEY_UPLOAD_OUTPUT
-  KEY_UPLOAD_OUTPUT=$(aws secretsmanager create-secret \
-    --name "$KEY_SECRET_NAME" \
-    --secret-string file://"$KEY_DIR/db.key" \
-    --query 'ARN' --output text 2>&1)
-
-  if [ $? -ne 0 ]; then
+  SECRET_ARN=$(upload_secret "$KEY_SECRET_NAME" <(printf '%s' "$DB_KEY"))
+  if [ $? -ne 0 ] || [ -z "$SECRET_ARN" ]; then
     echo "Error: Failed to upload signing key to Secrets Manager"
-    echo "$KEY_UPLOAD_OUTPUT"
-    rm -rf "$KEY_DIR"
+    unset DB_KEY
     exit 1
   fi
-
-  SECRET_ARN="$KEY_UPLOAD_OUTPUT"
+  unset DB_KEY
   echo "Signing key uploaded. ARN: $SECRET_ARN"
 
-  # Upload db.crt to Secrets Manager
+  # Upload db.crt to Secrets Manager (public artifact, but streamed the same way
+  # for consistency).
   echo "Uploading signing certificate to AWS Secrets Manager..."
   local CERT_SECRET_NAME="nitrotpm-sb-signing-cert-${TIMESTAMP}"
-  local CERT_UPLOAD_OUTPUT
-  CERT_UPLOAD_OUTPUT=$(aws secretsmanager create-secret \
-    --name "$CERT_SECRET_NAME" \
-    --secret-string file://"$KEY_DIR/db.crt" \
-    --query 'ARN' --output text 2>&1)
-
-  if [ $? -ne 0 ]; then
+  SECRET_CERT_ARN=$(upload_secret "$CERT_SECRET_NAME" <(printf '%s' "$DB_CRT"))
+  if [ $? -ne 0 ] || [ -z "$SECRET_CERT_ARN" ]; then
     echo "Error: Failed to upload signing certificate to Secrets Manager"
-    echo "$CERT_UPLOAD_OUTPUT"
     # Attempt to delete the already-uploaded key secret
     echo "Attempting to clean up already-uploaded signing key..."
     aws secretsmanager delete-secret --secret-id "$SECRET_ARN" --force-delete-without-recovery 2>/dev/null
-    rm -rf "$KEY_DIR"
     exit 1
   fi
-
-  SECRET_CERT_ARN="$CERT_UPLOAD_OUTPUT"
   echo "Signing certificate uploaded. ARN: $SECRET_CERT_ARN"
 
   # Upload the identity bundle (fixed GUID + PK/KEK certs) as a single JSON
@@ -162,29 +195,20 @@ generate_and_upload_keys() {
   local IDENTITY_SECRET_NAME="nitrotpm-sb-identity-${TIMESTAMP}"
   local IDENTITY_JSON
   IDENTITY_JSON=$(jq -n \
-    --arg guid "$(cat "$KEY_DIR/GUID.txt")" \
-    --arg pk_crt "$(cat "$KEY_DIR/PK.crt")" \
-    --arg kek_crt "$(cat "$KEY_DIR/KEK.crt")" \
+    --arg guid "$GUID" \
+    --arg pk_crt "$PK_CRT" \
+    --arg kek_crt "$KEK_CRT" \
     '{guid: $guid, pk_crt: $pk_crt, kek_crt: $kek_crt}')
-  local IDENTITY_UPLOAD_OUTPUT
-  IDENTITY_UPLOAD_OUTPUT=$(aws secretsmanager create-secret \
-    --name "$IDENTITY_SECRET_NAME" \
-    --secret-string "$IDENTITY_JSON" \
-    --query 'ARN' --output text 2>&1)
-
-  if [ $? -ne 0 ]; then
+  IDENTITY_ARN=$(upload_secret "$IDENTITY_SECRET_NAME" <(printf '%s' "$IDENTITY_JSON"))
+  if [ $? -ne 0 ] || [ -z "$IDENTITY_ARN" ]; then
     echo "Error: Failed to upload identity bundle to Secrets Manager"
-    echo "$IDENTITY_UPLOAD_OUTPUT"
     # Roll back the two already-uploaded secrets so we don't leave a partial
     # (unreproducible) identity behind.
     echo "Attempting to clean up already-uploaded key and certificate..."
     aws secretsmanager delete-secret --secret-id "$SECRET_ARN" --force-delete-without-recovery 2>/dev/null
     aws secretsmanager delete-secret --secret-id "$SECRET_CERT_ARN" --force-delete-without-recovery 2>/dev/null
-    rm -rf "$KEY_DIR"
     exit 1
   fi
-
-  IDENTITY_ARN="$IDENTITY_UPLOAD_OUTPUT"
   echo "Identity bundle uploaded. ARN: $IDENTITY_ARN"
 
   # Save ARNs to resources.json
@@ -192,9 +216,7 @@ generate_and_upload_keys() {
   update_resource "SECRET_CERT_ARN" "$SECRET_CERT_ARN"
   update_resource "IDENTITY_ARN" "$IDENTITY_ARN"
 
-  # Delete local key files
-  rm -rf "$KEY_DIR"
-  echo "Local key files deleted. Secrets stored securely in AWS Secrets Manager."
+  echo "Identity uploaded to AWS Secrets Manager. No private key was written to disk."
 }
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
