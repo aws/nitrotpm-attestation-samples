@@ -127,6 +127,8 @@ nix run .#create-ami -- result/nixos-tee_1.raw result/uefi_data.aws
 
 This separation ensures private signing keys never enter the nix store or cache, while builds remain fully reproducible (same source always produces the same unsigned image and PCR4 values).
 
+**Reproducible PCR7 requires a stable enrolled key set.** PCR4 (UKI content) is reproducible from the source alone, but PCR7 measures the PK/KEK/db EFI Signature Lists — including the owner GUID and every certificate. It is reproducible only if the *same* GUID and PK/KEK/db certs are reused across signings; regenerating any of them changes PCR7. The `nginx-kms` example persists this golden identity in AWS Secrets Manager (see its README) so PCR7 stays stable across deployments, and treats regenerating it as a deliberate PCR7 roll (the revocation model).
+
 ## Nix Web Server Example
 
 For an example for how you can use the builder flake to create your own Attestable AMIs, you can look at the [Nix Web Server Example](examples/nginx-kms/). This example demonstrates how to build a minimalistic [Attestable AMI](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/attestable-ami.html) with NGINX serving incoming decryption requests. The decryption is performed using a symmetric key, which is itself decrypted using AWS KMS based on attestation policy with AMI measurements.

@@ -27,11 +27,31 @@ The build workflow is:
 2. `nix run .#sign-efi-image -- <image-dir> <keys-dir> > tpm_pcr.json` — signs the UKI, patches the ESP, emits `uefi_data.aws`, and prints the full PCR set (PCR4 + PCR7) to stdout
 3. `nix run .#create-ami -- result/nixos-tee_1.raw uefi_data.aws` — registers AMI with UEFI secure boot data
 
-In production, provide consistent pre-generated key material for reproducible measurements.
+In production, reuse a consistent secure boot identity (the same GUID + PK/KEK/db certs) for reproducible measurements — see [Reproducible PCR7](#reproducible-pcr7-persist-the-whole-identity-not-just-db) below. `--secrets-manager` handles this automatically.
 
 ## Using AWS Secrets Manager for Signing Keys
 
-The `--secrets-manager` flag enables storing and retrieving secure boot signing keys via AWS Secrets Manager. This keeps private keys (`db.key`) completely out of the nix store and build cache — key material exists on the local filesystem only temporarily during the signing operation, then is immediately deleted.
+The `--secrets-manager` flag enables storing and retrieving the secure boot **golden identity** via AWS Secrets Manager. This keeps the private key (`db.key`) completely out of the nix store and build cache — key material exists on the local filesystem only temporarily during the signing operation, then is immediately deleted.
+
+### Reproducible PCR7: persist the whole identity, not just db
+
+PCR7 measures the UEFI secure boot policy — the byte-exact contents of the PK, KEK, and db EFI Signature Lists (ESLs). Each ESL embeds the owner GUID and the DER-encoded certificate, so PCR7 changes if the GUID or **any** of the PK/KEK/db certs change. Persisting only `db.key`/`db.crt` is therefore not enough for a reproducible PCR7: freshly generating PK/KEK and a random GUID on each run produces a different PCR7 every deployment.
+
+To make PCR7 reproducible, `--secrets-manager` persists the entire golden identity as **three** secrets:
+
+| Secret name | Contents | Purpose |
+|-------------|----------|---------|
+| `nitrotpm-sb-signing-key-<ts>` | `db.key` | signs the UKI (private key) |
+| `nitrotpm-sb-signing-cert-<ts>` | `db.crt` | rebuilds `db.esl` |
+| `nitrotpm-sb-identity-<ts>` | JSON `{guid, pk_crt, kek_crt}` | rebuilds `PK.esl` / `KEK.esl` with a fixed owner GUID |
+
+On each run the ESLs are rebuilt deterministically from these fixed inputs (`cert-to-efi-sig-list` is byte-deterministic given a fixed cert + GUID), so PCR4 **and** PCR7 are identical across deployments. The corresponding ARNs are stored in `artifacts/resources.json` (`SECRET_ARN`, `SECRET_CERT_ARN`, `IDENTITY_ARN`) and reused automatically.
+
+The PK/KEK **private** keys are never persisted or uploaded: the UEFI variable store is built with `uefivars -i none`, which consumes the ESLs (not the `.auth` enrollment files), so the PK/KEK private keys are unused after cert generation.
+
+**Regenerating the identity is a deliberate PCR7 roll.** Reusing the retained identity keeps PCR7 stable — which is the point of binding PCR7 in a KMS policy: one policy that survives image updates. Conversely, generating a fresh identity intentionally changes PCR7. This is the AWS revocation model: to prevent instances launched from old (untrusted) AMIs from passing your KMS policy, generate a new identity, rebuild the AMI, and update the policy to the new PCR7.
+
+Reuse is **strict**: all three ARNs must be present to reuse a retained identity. A partial `resources.json` (e.g. a legacy file with only `db`) is rejected for reuse and a full new identity is generated, because mixing an old db cert with a freshly generated PK/KEK/GUID would silently break PCR7.
 
 ### Syntax
 
@@ -50,23 +70,25 @@ When no `SECRET_ARN` is provided, the script enters interactive mode:
 ```
 
 In this mode the script:
-1. Prompts you to confirm generation of a new signing key hierarchy
-2. Generates PK, KEK, and db keys using OpenSSL
-3. Uploads `db.key` and `db.crt` to AWS Secrets Manager
-4. Saves the resulting `SECRET_ARN` to `artifacts/resources.json`
+1. Prompts you to confirm generation of a new signing identity
+2. Generates a fixed owner GUID and the PK, KEK, and db certificates using OpenSSL
+3. Uploads `db.key`, `db.crt`, and the identity bundle (`{guid, pk_crt, kek_crt}`) to AWS Secrets Manager
+4. Saves the resulting `SECRET_ARN`, `SECRET_CERT_ARN`, and `IDENTITY_ARN` to `artifacts/resources.json`
 5. Deletes the local key files
 
 ### Subsequent Deployments (With ARN)
 
-For subsequent deployments, provide the existing Secret ARN to retrieve the signing key from Secrets Manager:
+For subsequent deployments, provide the existing signing-key Secret ARN to retrieve the golden identity from Secrets Manager:
 
 ```sh
 ./scripts/start.sh --secure-boot --secrets-manager arn:aws:secretsmanager:REGION:ACCOUNT:secret:NAME
 ```
 
-In this mode the script retrieves the signing key and certificate from the existing secret and uses them for signing.
+The ARN on the command line is the `db.key` secret; the script resolves the matching `SECRET_CERT_ARN` and `IDENTITY_ARN` from `artifacts/resources.json` and reassembles the full identity (db key/cert + fixed GUID + PK/KEK certs) to rebuild a reproducible envelope. If those companion ARNs are not found, the run aborts — run interactive mode (`--secrets-manager` with no ARN) to generate a complete identity.
 
-The `SECRET_ARN` for subsequent deployments can be found in `artifacts/resources.json` under the key `SECRET_ARN`.
+Alternatively, run interactive mode with a populated `resources.json` and the script offers to reuse the retained identity directly (no ARN needed on the command line).
+
+The ARNs for subsequent deployments can be found in `artifacts/resources.json` under `SECRET_ARN`, `SECRET_CERT_ARN`, and `IDENTITY_ARN`.
 
 ### Security Benefit
 

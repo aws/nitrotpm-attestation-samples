@@ -15,6 +15,7 @@ DEBUG_FLAG=""
 SECRET_MANAGER_FLAG=""
 SECRET_ARN=""
 SECRET_CERT_ARN=""
+IDENTITY_ARN=""
 SECRET_MANAGER_INTERACTIVE=""
 NON_INTERACTIVE=false
 while [[ $# -gt 0 ]]; do
@@ -56,61 +57,62 @@ if [ -n "$SECRET_MANAGER_FLAG" ] && [ -z "$SECURE_BOOT_FLAG" ]; then
   exit 1
 fi
 
-# Generate secure boot key hierarchy and upload to AWS Secrets Manager
+# Generate secure boot golden identity and upload to AWS Secrets Manager.
+#
+# For reproducible PCR7, the ENTIRE enrolled key set must be byte-stable
+# across runs, not just db. PCR7 measures the PK/KEK/db EFI Signature Lists
+# (ESLs), each of which embeds the owner GUID and the DER-encoded cert.
+# We therefore persist the full golden identity as three secrets:
+#
+#   nitrotpm-sb-signing-key-<ts>  -> db.key          (the signing private key)
+#   nitrotpm-sb-signing-cert-<ts> -> db.crt          (rebuilds db.esl)
+#   nitrotpm-sb-identity-<ts>     -> {guid,pk_crt,kek_crt}  (rebuilds PK/KEK.esl)
+#
+# PK.key / KEK.key are never persisted: the uefivars '-i none' model consumes
+# ESLs (not .auth files), so the PK/KEK private keys are unused after cert
+# generation. Regenerating the identity is a deliberate act that rolls PCR7
+# (the AWS revocation model), not an accidental per-run side effect.
 generate_and_upload_keys() {
   echo ""
-  echo "No Secret ARN provided. Would you like to generate a new signing key hierarchy and upload it to AWS Secrets Manager?"
+  echo "No Secret ARN provided. Would you like to generate a new signing identity and upload it to AWS Secrets Manager?"
   if [ "$NON_INTERACTIVE" = true ]; then
-    echo "Non-interactive mode: generating and uploading keys."
+    echo "Non-interactive mode: generating and uploading identity."
     CONFIRM="yes"
   else
-    read -r -p "Generate and upload keys? (yes/no): " CONFIRM
+    read -r -p "Generate and upload identity? (yes/no): " CONFIRM
   fi
 
   if [[ "$CONFIRM" != "yes" ]]; then
-    echo "Key generation declined. Please provide an existing Secret ARN:"
+    echo "Identity generation declined. Please provide an existing Secret ARN:"
     echo "  ./scripts/start.sh --secure-boot --secrets-manager arn:aws:secretsmanager:REGION:ACCOUNT:secret:NAME"
     exit 1
   fi
 
-  echo "Generating secure boot key hierarchy (PK, KEK, db) using OpenSSL..."
+  echo "Generating secure boot golden identity (GUID + PK, KEK, db certs)..."
 
   local TIMESTAMP
   TIMESTAMP=$(date +%s)
   local KEY_DIR
   KEY_DIR=$(mktemp -d)
 
-  # Generate PK (Platform Key)
-  openssl req -new -x509 -newkey rsa:2048 -nodes -days 3650 \
-    -subj "/CN=Secure Boot Platform Key/" \
-    -keyout "$KEY_DIR/PK.key" -out "$KEY_DIR/PK.crt" 2>/dev/null
+  # Generate a fixed owner GUID and the PK/KEK/db certificates. This is the
+  # canonical identity; the ESLs (and thus PCR7) are derived deterministically
+  # from these files. Run inside a nix shell so uuidgen is available.
+  nix --extra-experimental-features nix-command --extra-experimental-features flakes shell \
+    nixpkgs#openssl nixpkgs#util-linux --command bash -c "
+    cd '$KEY_DIR'
+    uuidgen --random > GUID.txt
+    openssl req -newkey rsa:4096 -nodes -keyout PK.key -new -x509 -sha256 -days 3650 -subj '/CN=Platform key/' -out PK.crt 2>/dev/null
+    openssl req -newkey rsa:4096 -nodes -keyout KEK.key -new -x509 -sha256 -days 3650 -subj '/CN=Key Exchange Key/' -out KEK.crt 2>/dev/null
+    openssl req -newkey rsa:4096 -nodes -keyout db.key -new -x509 -sha256 -days 3650 -subj '/CN=Signature Database key/' -out db.crt 2>/dev/null
+  "
   if [ $? -ne 0 ]; then
-    echo "Error: Failed to generate PK key pair"
+    echo "Error: Failed to generate secure boot identity"
     rm -rf "$KEY_DIR"
     exit 1
   fi
 
-  # Generate KEK (Key Exchange Key)
-  openssl req -new -x509 -newkey rsa:2048 -nodes -days 3650 \
-    -subj "/CN=Secure Boot Key Exchange Key/" \
-    -keyout "$KEY_DIR/KEK.key" -out "$KEY_DIR/KEK.crt" 2>/dev/null
-  if [ $? -ne 0 ]; then
-    echo "Error: Failed to generate KEK key pair"
-    rm -rf "$KEY_DIR"
-    exit 1
-  fi
-
-  # Generate db (Signature Database Key)
-  openssl req -new -x509 -newkey rsa:2048 -nodes -days 3650 \
-    -subj "/CN=Secure Boot Signature Database Key/" \
-    -keyout "$KEY_DIR/db.key" -out "$KEY_DIR/db.crt" 2>/dev/null
-  if [ $? -ne 0 ]; then
-    echo "Error: Failed to generate db key pair"
-    rm -rf "$KEY_DIR"
-    exit 1
-  fi
-
-  echo "Key hierarchy generated successfully."
+  echo "Golden identity generated successfully."
 
   # Upload db.key to Secrets Manager
   echo "Uploading signing key to AWS Secrets Manager..."
@@ -153,9 +155,42 @@ generate_and_upload_keys() {
   SECRET_CERT_ARN="$CERT_UPLOAD_OUTPUT"
   echo "Signing certificate uploaded. ARN: $SECRET_CERT_ARN"
 
+  # Upload the identity bundle (fixed GUID + PK/KEK certs) as a single JSON
+  # secret. These public artifacts pin the PK/KEK ESL bytes so PCR7 is
+  # reproducible; without them PK/KEK would be regenerated each run.
+  echo "Uploading secure boot identity bundle to AWS Secrets Manager..."
+  local IDENTITY_SECRET_NAME="nitrotpm-sb-identity-${TIMESTAMP}"
+  local IDENTITY_JSON
+  IDENTITY_JSON=$(jq -n \
+    --arg guid "$(cat "$KEY_DIR/GUID.txt")" \
+    --arg pk_crt "$(cat "$KEY_DIR/PK.crt")" \
+    --arg kek_crt "$(cat "$KEY_DIR/KEK.crt")" \
+    '{guid: $guid, pk_crt: $pk_crt, kek_crt: $kek_crt}')
+  local IDENTITY_UPLOAD_OUTPUT
+  IDENTITY_UPLOAD_OUTPUT=$(aws secretsmanager create-secret \
+    --name "$IDENTITY_SECRET_NAME" \
+    --secret-string "$IDENTITY_JSON" \
+    --query 'ARN' --output text 2>&1)
+
+  if [ $? -ne 0 ]; then
+    echo "Error: Failed to upload identity bundle to Secrets Manager"
+    echo "$IDENTITY_UPLOAD_OUTPUT"
+    # Roll back the two already-uploaded secrets so we don't leave a partial
+    # (unreproducible) identity behind.
+    echo "Attempting to clean up already-uploaded key and certificate..."
+    aws secretsmanager delete-secret --secret-id "$SECRET_ARN" --force-delete-without-recovery 2>/dev/null
+    aws secretsmanager delete-secret --secret-id "$SECRET_CERT_ARN" --force-delete-without-recovery 2>/dev/null
+    rm -rf "$KEY_DIR"
+    exit 1
+  fi
+
+  IDENTITY_ARN="$IDENTITY_UPLOAD_OUTPUT"
+  echo "Identity bundle uploaded. ARN: $IDENTITY_ARN"
+
   # Save ARNs to resources.json
   update_resource "SECRET_ARN" "$SECRET_ARN"
   update_resource "SECRET_CERT_ARN" "$SECRET_CERT_ARN"
+  update_resource "IDENTITY_ARN" "$IDENTITY_ARN"
 
   # Delete local key files
   rm -rf "$KEY_DIR"
@@ -275,36 +310,67 @@ check_credentials_var AWS_DEFAULT_REGION
 
 echo "AWS credentials are set and validated."
 
-# Interactive key generation mode: generate keys and upload to Secrets Manager
+# Interactive key generation mode: generate identity and upload to Secrets Manager
 if [ -n "$SECRET_MANAGER_INTERACTIVE" ]; then
-  # Check if resources.json has retained secrets from a previous deployment
+  # Check if resources.json has a retained golden identity from a previous
+  # deployment. Reuse is strict: all THREE ARNs (key, cert, identity) must be
+  # present. A partial set (e.g. a legacy resources.json with only db) cannot
+  # reproduce PCR7 — mixing an old db with a freshly generated PK/KEK/GUID
+  # silently changes PCR7 — so we treat partial state as "no reusable
+  # identity" and regenerate the full set fresh.
   if [ -f "$RESOURCES_FILE" ]; then
     RETAINED_SECRET_ARN=$(jq -r '.SECRET_ARN // empty' "$RESOURCES_FILE" 2>/dev/null)
     RETAINED_CERT_ARN=$(jq -r '.SECRET_CERT_ARN // empty' "$RESOURCES_FILE" 2>/dev/null)
-    if [ -n "$RETAINED_SECRET_ARN" ] && [ -n "$RETAINED_CERT_ARN" ]; then
+    RETAINED_IDENTITY_ARN=$(jq -r '.IDENTITY_ARN // empty' "$RESOURCES_FILE" 2>/dev/null)
+    if [ -n "$RETAINED_SECRET_ARN" ] && [ -n "$RETAINED_CERT_ARN" ] && [ -n "$RETAINED_IDENTITY_ARN" ]; then
       echo ""
-      echo "Found retained signing keys from a previous deployment:"
-      echo "  Key:  $RETAINED_SECRET_ARN"
-      echo "  Cert: $RETAINED_CERT_ARN"
+      echo "Found retained secure boot identity from a previous deployment:"
+      echo "  Key:      $RETAINED_SECRET_ARN"
+      echo "  Cert:     $RETAINED_CERT_ARN"
+      echo "  Identity: $RETAINED_IDENTITY_ARN"
       if [ "$NON_INTERACTIVE" = true ]; then
-        echo "Non-interactive mode: reusing retained keys."
+        echo "Non-interactive mode: reusing retained identity."
         USE_RETAINED="yes"
       else
-        read -r -p "Use these retained keys? (yes/no): " USE_RETAINED
+        read -r -p "Use this retained identity? (yes/no): " USE_RETAINED
       fi
       if [[ "$USE_RETAINED" == "yes" ]]; then
         SECRET_ARN="$RETAINED_SECRET_ARN"
         SECRET_CERT_ARN="$RETAINED_CERT_ARN"
+        IDENTITY_ARN="$RETAINED_IDENTITY_ARN"
         SECRET_MANAGER_INTERACTIVE=""
-        echo "Using retained keys from Secrets Manager."
+        echo "Using retained identity from Secrets Manager."
       else
-        echo "Generating new keys..."
+        echo "Generating new identity..."
       fi
+    elif [ -n "$RETAINED_SECRET_ARN" ] || [ -n "$RETAINED_CERT_ARN" ] || [ -n "$RETAINED_IDENTITY_ARN" ]; then
+      echo ""
+      echo -e "\033[33m⚠️  WARNING: resources.json has a PARTIAL signing identity\033[0m"
+      echo -e "\033[33m   (key/cert/identity not all present). A partial set cannot\033[0m"
+      echo -e "\033[33m   reproduce PCR7, so a full new identity will be generated.\033[0m"
     fi
   fi
-  # If still in interactive mode (user declined retained keys or none found), generate new ones
+  # If still in interactive mode (user declined retained identity or none/partial found), generate new one
   if [ -n "$SECRET_MANAGER_INTERACTIVE" ]; then
     generate_and_upload_keys
+  fi
+fi
+
+# Inline-ARN mode: --secrets-manager <ARN> supplies only the db.key ARN on the
+# command line. Resolve the cert and identity ARNs from resources.json so the
+# full golden identity is reassembled. Without the identity bundle PCR7 is not
+# reproducible, so require it here too.
+if [ -n "$SECRET_ARN" ] && { [ -z "$SECRET_CERT_ARN" ] || [ -z "$IDENTITY_ARN" ]; }; then
+  if [ -f "$RESOURCES_FILE" ]; then
+    [ -z "$SECRET_CERT_ARN" ] && SECRET_CERT_ARN=$(jq -r '.SECRET_CERT_ARN // empty' "$RESOURCES_FILE" 2>/dev/null)
+    [ -z "$IDENTITY_ARN" ] && IDENTITY_ARN=$(jq -r '.IDENTITY_ARN // empty' "$RESOURCES_FILE" 2>/dev/null)
+  fi
+  if [ -z "$SECRET_CERT_ARN" ] || [ -z "$IDENTITY_ARN" ]; then
+    echo "Error: --secrets-manager <ARN> requires the matching cert and identity"
+    echo "       secrets, resolved from artifacts/resources.json (SECRET_CERT_ARN,"
+    echo "       IDENTITY_ARN). They were not found. Run interactive mode"
+    echo "       (--secrets-manager with no ARN) to generate a complete identity."
+    exit 1
   fi
 fi
 
@@ -369,14 +435,16 @@ if [ -n "$SECURE_BOOT_FLAG" ] && [ -z "$SECRET_MANAGER_FLAG" ]; then
   echo "Secure boot key hierarchy generated at: $LOCAL_KEY_DIR"
 fi
 
-# For --secrets-manager, generate PK/KEK/ESLs and uefi_data.aws around the stored db.crt
-# The db key is persistent (in Secrets Manager), but PK/KEK are ephemeral envelope keys
+# For --secrets-manager, rebuild the ESLs and uefi_data.aws from the persisted
+# golden identity. db.key/db.crt come from Secrets Manager; the fixed GUID and
+# PK/KEK certs come from the identity bundle. Because every ESL input (GUID +
+# all three certs) is byte-stable across runs, PCR7 is reproducible.
 if [ -n "$SECURE_BOOT_FLAG" ] && [ -n "$SECRET_MANAGER_FLAG" ]; then
   LOCAL_KEY_DIR="$SCRIPT_DIR/../sb-keys"
   rm -rf "$LOCAL_KEY_DIR"
   mkdir -p "$LOCAL_KEY_DIR"
 
-  echo "Generating UEFI secure boot envelope (PK, KEK, ESLs, uefi_data.aws)..."
+  echo "Rebuilding UEFI secure boot envelope from persisted identity (ESLs, uefi_data.aws)..."
 
   # Retrieve db.key and db.crt from Secrets Manager into a local
   # sb-keys/ directory. They are passed by file path to
@@ -401,29 +469,46 @@ if [ -n "$SECURE_BOOT_FLAG" ] && [ -n "$SECRET_MANAGER_FLAG" ]; then
     fi
   fi
 
+  # Retrieve the identity bundle (fixed GUID + PK/KEK certs) and unpack it into
+  # GUID.txt / PK.crt / KEK.crt. These fixed inputs are what make PCR7
+  # reproducible across deployments.
+  if [ -n "$IDENTITY_ARN" ]; then
+    IDENTITY_JSON=$(aws secretsmanager get-secret-value --secret-id "$IDENTITY_ARN" --query SecretString --output text)
+    if [ $? -ne 0 ]; then
+      echo "Error: Failed to retrieve secure boot identity bundle from Secrets Manager"
+      rm -rf "$LOCAL_KEY_DIR"
+      exit 1
+    fi
+    echo "$IDENTITY_JSON" | jq -r '.guid'   > "$LOCAL_KEY_DIR/GUID.txt"
+    echo "$IDENTITY_JSON" | jq -r '.pk_crt' > "$LOCAL_KEY_DIR/PK.crt"
+    echo "$IDENTITY_JSON" | jq -r '.kek_crt' > "$LOCAL_KEY_DIR/KEK.crt"
+    if [ ! -s "$LOCAL_KEY_DIR/GUID.txt" ] || [ ! -s "$LOCAL_KEY_DIR/PK.crt" ] || [ ! -s "$LOCAL_KEY_DIR/KEK.crt" ]; then
+      echo "Error: secure boot identity bundle is missing guid/pk_crt/kek_crt"
+      rm -rf "$LOCAL_KEY_DIR"
+      exit 1
+    fi
+  else
+    echo "Error: no secure boot identity bundle (IDENTITY_ARN) available; cannot"
+    echo "       rebuild a reproducible envelope."
+    rm -rf "$LOCAL_KEY_DIR"
+    exit 1
+  fi
+
+  # Rebuild the ESL set deterministically from the fixed GUID + persisted
+  # certs. No key generation and no new GUID: cert-to-efi-sig-list is
+  # byte-deterministic given a fixed cert + GUID, so PK/KEK/db ESLs — and thus
+  # PCR7 — are identical to prior runs. PK/KEK private keys are not needed
+  # (uefivars '-i none' consumes ESLs, not .auth files).
   nix --extra-experimental-features nix-command --extra-experimental-features flakes shell \
-    nixpkgs#openssl nixpkgs#efitools nixpkgs#util-linux --command bash -c "
+    nixpkgs#efitools --command bash -c "
     cd '$LOCAL_KEY_DIR'
-
-    uuidgen --random > GUID.txt
-
-    # Generate PK (ephemeral — only needed for UEFI var store)
-    openssl req -newkey rsa:4096 -nodes -keyout PK.key -new -x509 -sha256 -days 3650 -subj '/CN=Platform key/' -out PK.crt 2>/dev/null
     cert-to-efi-sig-list -g \"\$(cat GUID.txt)\" PK.crt PK.esl
-    sign-efi-sig-list -g \"\$(cat GUID.txt)\" -k PK.key -c PK.crt PK PK.esl PK.auth
-
-    # Generate KEK (ephemeral — only needed for UEFI var store)
-    openssl req -newkey rsa:4096 -nodes -keyout KEK.key -new -x509 -sha256 -days 3650 -subj '/CN=Key Exchange Key/' -out KEK.crt 2>/dev/null
     cert-to-efi-sig-list -g \"\$(cat GUID.txt)\" KEK.crt KEK.esl
-    sign-efi-sig-list -g \"\$(cat GUID.txt)\" -k PK.key -c PK.crt KEK KEK.esl KEK.auth
-
-    # Generate db ESL from the existing db.crt (from Secrets Manager)
     cert-to-efi-sig-list -g \"\$(cat GUID.txt)\" db.crt db.esl
-    sign-efi-sig-list -g \"\$(cat GUID.txt)\" -k KEK.key -c KEK.crt db db.esl db.auth
   "
 
   if [ $? -ne 0 ]; then
-    echo "Error: Failed to generate UEFI secure boot envelope"
+    echo "Error: Failed to rebuild UEFI secure boot envelope"
     rm -rf "$LOCAL_KEY_DIR"
     exit 1
   fi
@@ -578,6 +663,9 @@ if [ -n "$SECRET_ARN" ]; then
 fi
 if [ -n "$SECRET_CERT_ARN" ]; then
   echo "  - Secret ARN (cert): $SECRET_CERT_ARN"
+fi
+if [ -n "$IDENTITY_ARN" ]; then
+  echo "  - Secret ARN (identity): $IDENTITY_ARN"
 fi
 echo "  - Artifacts: $SCRIPT_DIR/../artifacts/"
 echo "  - EC2 Instance ID: $INSTANCE_ID"
