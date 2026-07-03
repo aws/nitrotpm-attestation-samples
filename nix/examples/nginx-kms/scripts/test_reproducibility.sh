@@ -28,14 +28,23 @@
 #     and never measures the image. The test also breaks if PCR4 fails to
 #     change (the mutation was a no-op, so the invariant went untested).
 #
+#   Test 4 - db.key never touches the filesystem (PR #18 r3513902421).
+#     Signs via sign-efi-image's --db-key-arn path: the private signing key is
+#     streamed from AWS Secrets Manager straight into sbsign (via an in-memory
+#     process-substitution fd) and no db.key file is written to the keys dir or
+#     the image dir. Asserts (a) signing still succeeds, (b) PCR7 equals the
+#     file-based identity reuse (Test 2), proving the fd path is byte-identical,
+#     and (c) no db.key file exists on disk anywhere in the signing tree. This
+#     test REQUIRES AWS credentials + Secrets Manager access; it is skipped
+#     (not counted) when AWS is unavailable.
+#
 # PCR4 (UKI content hash) tracks the image: it is independent of the signing
 # keys and stays stable only while the unsigned UKI is unchanged (Tests 1-2),
 # and changes when the image changes (Test 3).
 #
-# Does NOT call AWS. Exercises only the build/sign/PCR-compute phases via the
-# flake apps (sign-efi-image computes the PCRs it prints). The key-prep
-# helpers mirror the corresponding branches of scripts/start.sh; keep them in
-# sync when that logic changes.
+# Tests 1-3 do NOT call AWS. Test 4 does (it uploads a throwaway db.key secret
+# and deletes it afterward). The key-prep helpers mirror the corresponding
+# branches of scripts/start.sh; keep them in sync when that logic changes.
 #
 # Usage: ./scripts/test_reproducibility.sh
 
@@ -152,6 +161,25 @@ prepare_keys_from_identity() {
   chmod 0600 "$dest/db.key"
 }
 
+# NO-DISK model: like prepare_keys_from_identity, but WITHOUT copying db.key
+# into the keys dir. Only public artifacts (db.crt + ESLs) live on disk; the
+# private db.key is supplied to sign-efi-image out-of-band via --db-key-arn and
+# streamed from Secrets Manager in memory. Used by Test 4.
+prepare_keys_no_dbkey() {
+  local dest="$1" identity="$2"
+  mkdir -p "$dest"
+  cp "$identity/GUID.txt" "$identity/PK.crt" "$identity/KEK.crt" \
+     "$identity/db.crt" "$dest/"
+
+  nix --extra-experimental-features nix-command --extra-experimental-features flakes shell \
+    nixpkgs#efitools --command bash -c "
+    cd '$dest'
+    cert-to-efi-sig-list -g \"\$(cat GUID.txt)\" PK.crt PK.esl
+    cert-to-efi-sig-list -g \"\$(cat GUID.txt)\" KEK.crt KEK.esl
+    cert-to-efi-sig-list -g \"\$(cat GUID.txt)\" db.crt db.esl
+  " >/dev/null 2>&1
+}
+
 # CURRENT model: reuse only db.key/db.crt; regenerate PK/KEK and the owner
 # GUID fresh every run (mirrors today's --secrets-manager envelope block).
 # The fresh PK/KEK certs and random GUID change the PK/KEK/db ESL bytes, so
@@ -223,6 +251,36 @@ sign_and_compute_pcrs() {
   nix --extra-experimental-features nix-command --extra-experimental-features flakes \
     run .#sign-efi-image -- "$image_dir" "$keys_dir" \
     > "$image_dir/tpm_pcr.json" 2>/dev/null
+}
+
+# Signs the unsigned UKI using the NO-DISK db.key path: db.key is fetched from
+# AWS Secrets Manager by sign-efi-image itself (via --db-key-arn) and streamed
+# into sbsign in memory, so no db.key file is present in <keys-dir>. The public
+# db.crt and the ESLs still live in <keys-dir>. Mirrors the production
+# --secrets-manager flow after PR #18 r3513902421.
+sign_and_compute_pcrs_via_arn() {
+  local image_dir="$1" keys_dir="$2" db_key_arn="$3"
+
+  nix --extra-experimental-features nix-command --extra-experimental-features flakes \
+    run .#sign-efi-image -- "$image_dir" "$keys_dir" --db-key-arn "$db_key_arn" \
+    > "$image_dir/tpm_pcr.json" 2>/dev/null
+}
+
+# Fails the run unless NO db.key file exists anywhere under <dir>. This is the
+# core no-disk assertion for PR #18 r3513902421: the private signing key must
+# never be written to the filesystem when signing via Secrets Manager.
+assert_no_db_key_on_disk() {
+  local label="$1" dir="$2"
+  local found
+  found=$(find "$dir" -name 'db.key' 2>/dev/null)
+  if [ -z "$found" ]; then
+    echo -e "${GREEN}PASS${RESET} $label: no db.key on disk"
+    PASS_COUNT=$((PASS_COUNT + 1))
+  else
+    echo -e "${RED}FAIL${RESET} $label: db.key written to disk"
+    echo "  found: $found"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+  fi
 }
 
 # ------------------------------------------------------------------------
@@ -337,6 +395,68 @@ assert_pcr_differ "PCR4 (UKI hash, distinct images)" \
   "$RUN3A/tpm_pcr.json" "$RUN3B/tpm_pcr.json" "PCR4"
 assert_pcr_match  "PCR7 (secure boot policy, image-independent)" \
   "$RUN3A/tpm_pcr.json" "$RUN3B/tpm_pcr.json" "PCR7"
+echo
+
+# ==== Test 4: db.key never touches disk (PR #18 r3513902421) ====
+echo "----------------------------------------------------"
+echo " Test 4: sign via --db-key-arn (no db.key on disk)"
+echo "         EXPECT: signing OK, PCR7 == Test 2, no db.key file"
+echo "----------------------------------------------------"
+
+# Resolve a region for Secrets Manager (config -> env -> IMDSv2).
+SM_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-$(aws configure get region 2>/dev/null)}}"
+if [ -z "$SM_REGION" ]; then
+  IMDS_TOKEN=$(curl -s -X PUT http://169.254.169.254/latest/api/token \
+    -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null)
+  SM_REGION=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
+    http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null)
+fi
+
+if ! command -v aws >/dev/null 2>&1 \
+   || [ -z "$SM_REGION" ] \
+   || ! aws sts get-caller-identity --region "$SM_REGION" >/dev/null 2>&1; then
+  echo -e "${YELLOW}SKIP${RESET} Test 4: AWS credentials / Secrets Manager unavailable"
+  echo "  (requires aws CLI, a resolvable region, and valid credentials)"
+else
+  KEYS4="$TEST_DIR/keys4"
+  RUN4="$TEST_DIR/run4"
+  # Unique-ish secret name without Math.random/Date.now: derive from PID + PPID.
+  DBKEY_SECRET_NAME="nitrotpm-sb-test-dbkey-$$-$PPID"
+  DBKEY_ARN=""
+
+  # Upload the identity's db.key as a throwaway Secrets Manager secret, then
+  # ensure it is deleted no matter how the test exits.
+  cleanup_test4_secret() {
+    [ -n "$DBKEY_ARN" ] && aws secretsmanager delete-secret \
+      --secret-id "$DBKEY_ARN" --force-delete-without-recovery \
+      --region "$SM_REGION" >/dev/null 2>&1
+  }
+  trap 'cleanup_test4_secret; cleanup' EXIT INT TERM
+
+  echo -e "${YELLOW}>>> Run 4: upload throwaway db.key to Secrets Manager${RESET}"
+  # Capture the ARN directly (not via run_step, whose label would pollute stdout).
+  DBKEY_ARN=$(aws secretsmanager create-secret --name "$DBKEY_SECRET_NAME" \
+    --secret-string file://"$IDENTITY/db.key" \
+    --query ARN --output text --region "$SM_REGION" 2>/dev/null | tr -d '[:space:]')
+
+  if [ -z "$DBKEY_ARN" ] || [[ "$DBKEY_ARN" != arn:aws:secretsmanager:* ]]; then
+    echo -e "${RED}FAIL${RESET} Test 4: could not create db.key secret"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+  else
+    run_step "Run 4: prepare keys WITHOUT db.key on disk" prepare_keys_no_dbkey "$KEYS4" "$IDENTITY"
+    run_step "Run 4: prepare image dir"                   prepare_image_dir "$RUN4"
+    run_step "Run 4: sign via ARN + compute PCRs"         sign_and_compute_pcrs_via_arn "$RUN4" "$KEYS4" "$DBKEY_ARN"
+
+    echo
+    # (a) signing succeeded -> PCR7 present and equal to the file-based reuse
+    #     (Test 2), proving the in-memory fd signature is byte-identical.
+    assert_pcr_match "PCR7 (fd path == file-based identity reuse)" \
+      "$RUN4/tpm_pcr.json" "$RUN2A/tpm_pcr.json" "PCR7"
+    # (b) the private key was never written to disk anywhere in the tree.
+    assert_no_db_key_on_disk "keys dir has no db.key"  "$KEYS4"
+    assert_no_db_key_on_disk "image dir has no db.key" "$RUN4"
+  fi
+fi
 echo
 
 # ==== Summary ====

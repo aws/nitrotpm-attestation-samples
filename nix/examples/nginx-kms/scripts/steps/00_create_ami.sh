@@ -13,6 +13,7 @@ set -uo pipefail
 # Parse command line arguments
 SECURE_BOOT=false
 DEBUG=false
+DB_KEY_ARN=""
 while [[ $# -gt 0 ]]; do
   case $1 in
     --secure-boot)
@@ -22,6 +23,13 @@ while [[ $# -gt 0 ]]; do
     --debug)
       DEBUG=true
       shift
+      ;;
+    --db-key-arn)
+      # The db signing key stays in Secrets Manager: sign-efi-image fetches it
+      # and streams it into sbsign in memory, so no db.key file is staged in
+      # sb-keys/. Only the public db.crt + ESLs live on disk.
+      DB_KEY_ARN="$2"
+      shift 2
       ;;
     --secrets-manager|--secret-cert-arn)
       # Accepted for backwards compatibility with start.sh; the actual
@@ -51,7 +59,11 @@ if [ "$SECURE_BOOT" = true ]; then
     echo "       start.sh should populate sb-keys/ with the key hierarchy."
     exit 1
   fi
-  for f in db.key db.crt PK.esl KEK.esl db.esl; do
+  # db.key is only staged on disk when NOT fetching it from Secrets Manager.
+  # With --db-key-arn, sign-efi-image streams the key in memory.
+  REQUIRED_SB_FILES="db.crt PK.esl KEK.esl db.esl"
+  [ -z "$DB_KEY_ARN" ] && REQUIRED_SB_FILES="db.key $REQUIRED_SB_FILES"
+  for f in $REQUIRED_SB_FILES; do
     if [ ! -f "sb-keys/$f" ]; then
       echo "Error: secure boot requested but sb-keys/$f is missing."
       exit 1
@@ -89,9 +101,13 @@ if [ "$SECURE_BOOT" = true ]; then
 
   # sign-efi-image signs the UKI, patches the ESP, builds the UEFI var
   # store, and prints the full PCR set (PCR4 + PCR7) to stdout, which we
-  # capture into tpm_pcr.json.
+  # capture into tpm_pcr.json. When a db-key ARN is supplied, the private
+  # signing key is streamed from Secrets Manager into sbsign in memory and
+  # never staged in sb-keys/.
+  SIGN_ARGS=("$WORK_DIR" "$PROJECT_DIR/sb-keys")
+  [ -n "$DB_KEY_ARN" ] && SIGN_ARGS+=(--db-key-arn "$DB_KEY_ARN")
   nix --extra-experimental-features nix-command --extra-experimental-features flakes \
-    run .#sign-efi-image -- "$WORK_DIR" "$PROJECT_DIR/sb-keys" \
+    run .#sign-efi-image -- "${SIGN_ARGS[@]}" \
     > "$WORK_DIR/tpm_pcr.json"
 
   if [ $? -ne 0 ]; then

@@ -21,6 +21,7 @@ let
       mtools
       util-linux
       jq
+      awscli2
       nitrotpm-tools
       pythonEnv
     ];
@@ -28,8 +29,8 @@ let
     text = ''
       set -euo pipefail
 
-      if [ "$#" -lt 2 ]; then
-        echo "Usage: sign-efi-image <image-dir> <keys-dir> [> tpm_pcr.json]" >&2
+      usage() {
+        echo "Usage: sign-efi-image <image-dir> <keys-dir> [--db-key-arn <ARN>] [> tpm_pcr.json]" >&2
         echo "" >&2
         echo "Signs the unsigned UKI in <image-dir>, builds the UEFI variable" >&2
         echo "store from the secure boot key hierarchy in <keys-dir>, patches" >&2
@@ -42,8 +43,16 @@ let
         echo "Arguments:" >&2
         echo "  image-dir  Output of 'nix build .#raw-image' (contains" >&2
         echo "             unsigned.efi, *.raw, repart-output.json)" >&2
-        echo "  keys-dir   Directory with db.key, db.crt, PK.esl, KEK.esl," >&2
-        echo "             db.esl" >&2
+        echo "  keys-dir   Directory with db.crt, PK.esl, KEK.esl, db.esl" >&2
+        echo "             (and db.key unless --db-key-arn is used)" >&2
+        echo "" >&2
+        echo "Options:" >&2
+        echo "  --db-key-arn <ARN>  Fetch the db signing key (PEM) from AWS" >&2
+        echo "             Secrets Manager and stream it straight into sbsign" >&2
+        echo "             via an in-memory fd. The private key is never" >&2
+        echo "             written to disk; no db.key file is read from" >&2
+        echo "             keys-dir. Without this flag, keys-dir/db.key is" >&2
+        echo "             used as before." >&2
         echo "" >&2
         echo "Outputs (written to image-dir):" >&2
         echo "  signed.efi      The signed UKI" >&2
@@ -51,12 +60,57 @@ let
         echo "" >&2
         echo "The computed PCR JSON is printed to stdout; redirect it to a" >&2
         echo "file, e.g. 'sign-efi-image <image-dir> <keys-dir> > tpm_pcr.json'." >&2
+      }
+
+      # Fetch a Secrets Manager secret's plaintext to stdout. Intended to be
+      # called inside a process substitution (e.g. sbsign --key <(fetch_secret
+      # "$ARN")) so the value streams straight into the consuming process and
+      # is never held in a shell variable or written to disk. Fails loudly (and,
+      # under set -o pipefail, aborts the caller) if the secret is missing or
+      # empty, so an unreadable ARN can't silently feed empty input downstream.
+      fetch_secret() {
+        local arn="$1" value
+        if ! value=$(aws secretsmanager get-secret-value \
+              --secret-id "$arn" --query SecretString --output text); then
+          echo "Error: failed to retrieve secret from Secrets Manager ($arn)" >&2
+          return 1
+        fi
+        if [ -z "$value" ]; then
+          echo "Error: secret from Secrets Manager is empty ($arn)" >&2
+          return 1
+        fi
+        printf '%s' "$value"
+      }
+
+      if [ "$#" -lt 2 ]; then
+        usage
         exit 1
       fi
 
       IMAGE_DIR="$1"
       KEYS_DIR="$2"
+      shift 2
       EFI_NAME="${efiFileName}"
+
+      # Optional: fetch db.key from Secrets Manager instead of reading a file.
+      DB_KEY_ARN=""
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --db-key-arn)
+            if [ "$#" -lt 2 ]; then
+              echo "Error: --db-key-arn requires an ARN argument" >&2
+              exit 1
+            fi
+            DB_KEY_ARN="$2"
+            shift 2
+            ;;
+          *)
+            echo "Error: unknown argument '$1'" >&2
+            usage
+            exit 1
+            ;;
+        esac
+      done
 
       if [ ! -d "$IMAGE_DIR" ]; then
         echo "Error: image-dir '$IMAGE_DIR' not found" >&2
@@ -79,7 +133,13 @@ let
         exit 1
       fi
 
-      for f in db.key db.crt PK.esl KEK.esl db.esl; do
+      # db.key is only required as a file when not fetching it from Secrets
+      # Manager. db.crt + the ESLs are public and always come from keys-dir.
+      REQUIRED_KEY_FILES="db.crt PK.esl KEK.esl db.esl"
+      if [ -z "$DB_KEY_ARN" ]; then
+        REQUIRED_KEY_FILES="db.key $REQUIRED_KEY_FILES"
+      fi
+      for f in $REQUIRED_KEY_FILES; do
         if [ ! -f "$KEYS_DIR/$f" ]; then
           echo "Error: required key file '$f' not found in $KEYS_DIR" >&2
           exit 1
@@ -95,11 +155,24 @@ let
       # only the final PCR JSON reaches stdout (the caller redirects it into
       # tpm_pcr.json). Tools like sbverify print "Signature verification OK"
       # on stdout, which would otherwise corrupt the JSON.
-      echo "Signing UKI with db.key..." >&2
-      sbsign --key "$KEYS_DIR/db.key" \
-             --cert "$KEYS_DIR/db.crt" \
-             --output "$WORK_DIR/$EFI_NAME" \
-             "$IMAGE_DIR/unsigned.efi" >&2
+      if [ -n "$DB_KEY_ARN" ]; then
+        # Stream the signing key straight from Secrets Manager into sbsign via a
+        # process-substitution fd. fetch_secret writes the PEM to the fd's pipe;
+        # it is never held in a shell variable or written to a file, so it never
+        # touches disk (PR #18 r3513902421). sbsign reads the key through
+        # OpenSSL's PEM BIO, which is happy with a non-seekable fd.
+        echo "Fetching db signing key from Secrets Manager and signing UKI (no disk)..." >&2
+        sbsign --key <(fetch_secret "$DB_KEY_ARN") \
+               --cert "$KEYS_DIR/db.crt" \
+               --output "$WORK_DIR/$EFI_NAME" \
+               "$IMAGE_DIR/unsigned.efi" >&2
+      else
+        echo "Signing UKI with db.key..." >&2
+        sbsign --key "$KEYS_DIR/db.key" \
+               --cert "$KEYS_DIR/db.crt" \
+               --output "$WORK_DIR/$EFI_NAME" \
+               "$IMAGE_DIR/unsigned.efi" >&2
+      fi
 
       echo "Verifying signature..." >&2
       sbverify --cert "$KEYS_DIR/db.crt" "$WORK_DIR/$EFI_NAME" >&2

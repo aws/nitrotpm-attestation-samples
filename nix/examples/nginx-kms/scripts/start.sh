@@ -436,9 +436,11 @@ if [ -n "$SECURE_BOOT_FLAG" ] && [ -z "$SECRET_MANAGER_FLAG" ]; then
 fi
 
 # For --secrets-manager, rebuild the ESLs and uefi_data.aws from the persisted
-# golden identity. db.key/db.crt come from Secrets Manager; the fixed GUID and
-# PK/KEK certs come from the identity bundle. Because every ESL input (GUID +
-# all three certs) is byte-stable across runs, PCR7 is reproducible.
+# golden identity. db.crt + the fixed GUID + PK/KEK certs come from the identity
+# bundle; the db signing private key stays in Secrets Manager and is fetched
+# in-memory by sign-efi-image at signing time (never staged to disk). Because
+# every ESL input (GUID + all three certs) is byte-stable across runs, PCR7 is
+# reproducible.
 if [ -n "$SECURE_BOOT_FLAG" ] && [ -n "$SECRET_MANAGER_FLAG" ]; then
   LOCAL_KEY_DIR="$SCRIPT_DIR/../sb-keys"
   rm -rf "$LOCAL_KEY_DIR"
@@ -446,20 +448,11 @@ if [ -n "$SECURE_BOOT_FLAG" ] && [ -n "$SECRET_MANAGER_FLAG" ]; then
 
   echo "Rebuilding UEFI secure boot envelope from persisted identity (ESLs, uefi_data.aws)..."
 
-  # Retrieve db.key and db.crt from Secrets Manager into a local
-  # sb-keys/ directory. They are passed by file path to
-  # `nix run .#sign-efi-image` (which runs outside the nix derivation),
-  # so neither file enters /nix/store/ as a build input.
-  if [ -n "$SECRET_ARN" ]; then
-    aws secretsmanager get-secret-value --secret-id "$SECRET_ARN" --query SecretString --output text > "$LOCAL_KEY_DIR/db.key"
-    if [ $? -ne 0 ]; then
-      echo "Error: Failed to retrieve db.key from Secrets Manager"
-      rm -rf "$LOCAL_KEY_DIR"
-      exit 1
-    fi
-    chmod 0600 "$LOCAL_KEY_DIR/db.key"
-  fi
-
+  # The db signing PRIVATE key is deliberately NOT retrieved to disk here. It
+  # stays in Secrets Manager; sign-efi-image fetches it via --db-key-arn (the
+  # SECRET_ARN passed through to 00_create_ami.sh) and streams it into sbsign in
+  # memory, so db.key never touches the filesystem (PR #18 r3513902421). Only
+  # the public db.crt + ESLs are staged in sb-keys/ below.
   if [ -n "$SECRET_CERT_ARN" ]; then
     aws secretsmanager get-secret-value --secret-id "$SECRET_CERT_ARN" --query SecretString --output text > "$LOCAL_KEY_DIR/db.crt"
     if [ $? -ne 0 ]; then
@@ -533,8 +526,11 @@ echo "Step 1: Creating AMI..."
 # Build the argument list for 00_create_ami.sh
 CREATE_AMI_ARGS="$SECURE_BOOT_FLAG $DEBUG_FLAG"
 if [ -n "$SECRET_MANAGER_FLAG" ]; then
+  # SECRET_ARN is the db signing-key secret. Pass it as --db-key-arn so
+  # sign-efi-image fetches the key from Secrets Manager and streams it into
+  # sbsign in memory; db.key is never written to sb-keys/ (PR #18 r3513902421).
   if [ -n "$SECRET_ARN" ]; then
-    CREATE_AMI_ARGS="$CREATE_AMI_ARGS --secrets-manager $SECRET_ARN"
+    CREATE_AMI_ARGS="$CREATE_AMI_ARGS --db-key-arn $SECRET_ARN"
   fi
   if [ -n "$SECRET_CERT_ARN" ]; then
     CREATE_AMI_ARGS="$CREATE_AMI_ARGS --secret-cert-arn $SECRET_CERT_ARN"
