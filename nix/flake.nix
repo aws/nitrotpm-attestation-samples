@@ -15,10 +15,9 @@
           pkgs = import nixpkgs {
             inherit system;
             overlays = [
-              # GHSA-xrv8-2pf5-f3q7: nitrotpm-tools < 1.1.0 omits PCR12
-              # (kernel command line) from the measurement output, allowing an
-              # operator with UefiData modify rights to inject cmdline overrides
-              # while keeping PCR4 unchanged.
+              # Require nitrotpm-tools >= 1.1.0 so PCR12 is emitted (versions
+              # below omit it). See the GHSA-xrv8-2pf5-f3q7 security note in
+              # nix/README.md for why PCR12 matters.
               (final: prev: {
                 nitrotpm-tools =
                   assert prev.lib.assertMsg
