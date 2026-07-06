@@ -162,9 +162,8 @@ prepare_keys_from_identity() {
 }
 
 # NO-DISK model: like prepare_keys_from_identity, but WITHOUT copying db.key
-# into the keys dir. Only public artifacts (db.crt + ESLs) live on disk; the
-# private db.key is supplied to sign-efi-image out-of-band via --db-key-arn and
-# streamed from Secrets Manager in memory. Used by Test 4.
+# into the keys dir. Only public artifacts (db.crt + ESLs) live on disk; db.key
+# is supplied out-of-band via --db-key-arn. Used by Test 4.
 prepare_keys_no_dbkey() {
   local dest="$1" identity="$2"
   mkdir -p "$dest"
@@ -221,10 +220,8 @@ prepare_image_dir() {
 # overwrites a few bytes inside the .linux (kernel) section IN PLACE: same
 # size, same section layout, so the result is still a valid, signable PE, but
 # the whole-PE hash differs. <marker> is distinct per run, so two mutated
-# images differ deterministically (no reliance on randomness).
-#
-# PCR7 measures only the PK/KEK/db ESLs, never the image, so this mutation
-# must NOT affect PCR7 -- which is exactly what Test 3 asserts.
+# images differ deterministically (no reliance on randomness). PCR7 never
+# measures the image (see header), which Test 3 asserts.
 mutate_uki() {
   local image_dir="$1" marker="$2"
   nix --extra-experimental-features nix-command --extra-experimental-features flakes shell \
@@ -253,11 +250,9 @@ sign_and_compute_pcrs() {
     > "$image_dir/tpm_pcr.json" 2>/dev/null
 }
 
-# Signs the unsigned UKI using the NO-DISK db.key path: db.key is fetched from
-# AWS Secrets Manager by sign-efi-image itself (via --db-key-arn) and streamed
-# into sbsign in memory, so no db.key file is present in <keys-dir>. The public
-# db.crt and the ESLs still live in <keys-dir>. Mirrors the production
-# --secrets-manager flow after PR #18 r3513902421.
+# Signs the unsigned UKI using the NO-DISK db.key path: sign-efi-image fetches
+# db.key from Secrets Manager via --db-key-arn, so no db.key file is present in
+# <keys-dir> (only db.crt + ESLs). Mirrors the production --secrets-manager flow.
 sign_and_compute_pcrs_via_arn() {
   local image_dir="$1" keys_dir="$2" db_key_arn="$3"
 
@@ -266,9 +261,9 @@ sign_and_compute_pcrs_via_arn() {
     > "$image_dir/tpm_pcr.json" 2>/dev/null
 }
 
-# Fails the run unless NO db.key file exists anywhere under <dir>. This is the
-# core no-disk assertion for PR #18 r3513902421: the private signing key must
-# never be written to the filesystem when signing via Secrets Manager.
+# Fails the run unless NO db.key file exists anywhere under <dir>: the core
+# no-disk assertion (the private key must never be written to the filesystem
+# when signing via Secrets Manager).
 assert_no_db_key_on_disk() {
   local label="$1" dir="$2"
   local found
@@ -397,7 +392,7 @@ assert_pcr_match  "PCR7 (secure boot policy, image-independent)" \
   "$RUN3A/tpm_pcr.json" "$RUN3B/tpm_pcr.json" "PCR7"
 echo
 
-# ==== Test 4: db.key never touches disk (PR #18 r3513902421) ====
+# ==== Test 4: db.key never touches disk ====
 echo "----------------------------------------------------"
 echo " Test 4: sign via --db-key-arn (no db.key on disk)"
 echo "         EXPECT: signing OK, PCR7 == Test 2, no db.key file"

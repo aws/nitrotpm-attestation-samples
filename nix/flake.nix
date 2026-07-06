@@ -45,7 +45,6 @@
             };
 
             apps = {
-              # Utilities
               # Boot an image with QEMU
               boot-uefi-qemu = pkgs.callPackage ./utils/boot-uefi-qemu.nix { };
               # Create an AMI from the raw image input

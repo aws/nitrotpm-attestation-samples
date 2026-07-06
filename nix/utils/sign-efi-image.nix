@@ -62,10 +62,8 @@ let
         echo "file, e.g. 'sign-efi-image <image-dir> <keys-dir> > tpm_pcr.json'." >&2
       }
 
-      # Fetch a Secrets Manager secret's plaintext to stdout. Intended to be
-      # called inside a process substitution (e.g. sbsign --key <(fetch_secret
-      # "$ARN")) so the value streams straight into the consuming process and
-      # is never held in a shell variable or written to disk. Fails loudly (and,
+      # Fetch a Secrets Manager secret's plaintext to stdout, for use inside a
+      # process substitution (see the signing block below). Fails loudly (and,
       # under set -o pipefail, aborts the caller) if the secret is missing or
       # empty, so an unreadable ARN can't silently feed empty input downstream.
       fetch_secret() {
@@ -149,8 +147,6 @@ let
       WORK_DIR=$(mktemp -d)
       trap 'rm -rf "$WORK_DIR"' EXIT INT TERM
 
-      # Progress goes to stderr so stdout carries only the PCR JSON, which
-      # the caller redirects (e.g. '... > tpm_pcr.json').
       # Every intermediate tool has its stdout redirected to stderr so that
       # only the final PCR JSON reaches stdout (the caller redirects it into
       # tpm_pcr.json). Tools like sbverify print "Signature verification OK"
@@ -186,10 +182,8 @@ let
         -K "$KEYS_DIR/KEK.esl" \
         --db "$KEYS_DIR/db.esl" >&2
 
-      # Patch the signed UKI into the ESP partition of the raw image. The
-      # caller is expected to have placed a writable copy of the raw image
-      # into IMAGE_DIR (the original from result/ is a read-only nix store
-      # symlink).
+      # Patch the signed UKI into the ESP partition of the raw image (the
+      # caller must supply a writable copy — result/ is a read-only symlink).
       if [ ! -w "$RAW_IMAGE" ]; then
         echo "Error: raw image '$RAW_IMAGE' is not writable. Copy it to a" >&2
         echo "       writable location before invoking sign-efi-image." >&2

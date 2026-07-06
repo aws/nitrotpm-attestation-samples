@@ -9,7 +9,6 @@ validate_secret_arn() {
   fi
 }
 
-# Parse command line arguments
 SECURE_BOOT_FLAG=""
 DEBUG_FLAG=""
 SECRET_MANAGER_FLAG=""
@@ -108,12 +107,7 @@ upload_secret() {
 #   nitrotpm-sb-signing-cert-<ts> -> db.crt          (rebuilds db.esl)
 #   nitrotpm-sb-identity-<ts>     -> {guid,pk_crt,kek_crt}  (rebuilds PK/KEK.esl)
 #
-# No private key is ever written to disk: the material is generated in memory
-# (generate_identity_material) and streamed into Secrets Manager via process
-# substitution (upload_secret). PK.key / KEK.key are never persisted at all;
-# db.key lives only in a shell variable until it is uploaded, then unset.
-# Regenerating the identity is a deliberate act that rolls PCR7 (the AWS
-# revocation model), not an accidental per-run side effect.
+# Regenerating the identity deliberately rolls PCR7 (the AWS revocation model).
 generate_and_upload_keys() {
   echo ""
   echo "No Secret ARN provided. Would you like to generate a new signing identity and upload it to AWS Secrets Manager?"
@@ -135,8 +129,8 @@ generate_and_upload_keys() {
   local TIMESTAMP
   TIMESTAMP=$(date +%s)
 
-  # Generate the entire identity in memory. No private key is written to disk;
-  # the material is returned as a JSON object we unpack into shell variables.
+  # Generate the entire identity in memory (returned as a JSON object we
+  # unpack into shell variables).
   local IDENTITY_MATERIAL
   IDENTITY_MATERIAL=$(generate_identity_material)
   if [ $? -ne 0 ] || [ -z "$IDENTITY_MATERIAL" ]; then
@@ -160,9 +154,8 @@ generate_and_upload_keys() {
 
   echo "Golden identity generated successfully."
 
-  # Upload db.key to Secrets Manager. The private key is streamed from a process
-  # substitution (a pipe) into the upload helper, so it is never written to a
-  # file. It lives only in the DB_KEY variable, which we unset immediately after.
+  # Upload db.key to Secrets Manager via process substitution (never written to
+  # a file); it lives only in DB_KEY, which we unset immediately after.
   echo "Uploading signing key to AWS Secrets Manager..."
   local KEY_SECRET_NAME="nitrotpm-sb-signing-key-${TIMESTAMP}"
   SECRET_ARN=$(upload_secret "$KEY_SECRET_NAME" <(printf '%s' "$DB_KEY"))
@@ -211,7 +204,6 @@ generate_and_upload_keys() {
   fi
   echo "Identity bundle uploaded. ARN: $IDENTITY_ARN"
 
-  # Save ARNs to resources.json
   update_resource "SECRET_ARN" "$SECRET_ARN"
   update_resource "SECRET_CERT_ARN" "$SECRET_CERT_ARN"
   update_resource "IDENTITY_ARN" "$IDENTITY_ARN"
@@ -458,11 +450,8 @@ if [ -n "$SECURE_BOOT_FLAG" ] && [ -z "$SECRET_MANAGER_FLAG" ]; then
 fi
 
 # For --secrets-manager, rebuild the ESLs and uefi_data.aws from the persisted
-# golden identity. db.crt + the fixed GUID + PK/KEK certs come from the identity
-# bundle; the db signing private key stays in Secrets Manager and is fetched
-# in-memory by sign-efi-image at signing time (never staged to disk). Because
-# every ESL input (GUID + all three certs) is byte-stable across runs, PCR7 is
-# reproducible.
+# golden identity (db.crt + fixed GUID + PK/KEK certs from the identity bundle).
+# Every ESL input is byte-stable across runs, so PCR7 is reproducible.
 if [ -n "$SECURE_BOOT_FLAG" ] && [ -n "$SECRET_MANAGER_FLAG" ]; then
   LOCAL_KEY_DIR="$SCRIPT_DIR/../sb-keys"
   rm -rf "$LOCAL_KEY_DIR"
@@ -470,11 +459,10 @@ if [ -n "$SECURE_BOOT_FLAG" ] && [ -n "$SECRET_MANAGER_FLAG" ]; then
 
   echo "Rebuilding UEFI secure boot envelope from persisted identity (ESLs, uefi_data.aws)..."
 
-  # The db signing PRIVATE key is deliberately NOT retrieved to disk here. It
-  # stays in Secrets Manager; sign-efi-image fetches it via --db-key-arn (the
-  # SECRET_ARN passed through to 00_create_ami.sh) and streams it into sbsign in
-  # memory, so db.key never touches the filesystem (PR #18 r3513902421). Only
-  # the public db.crt + ESLs are staged in sb-keys/ below.
+  # The db signing PRIVATE key is deliberately NOT retrieved to disk here; it
+  # stays in Secrets Manager and is fetched in-memory at signing time via
+  # --db-key-arn (see sign-efi-image.nix). Only the public db.crt + ESLs are
+  # staged in sb-keys/ below.
   if [ -n "$SECRET_CERT_ARN" ]; then
     aws secretsmanager get-secret-value --secret-id "$SECRET_CERT_ARN" --query SecretString --output text > "$LOCAL_KEY_DIR/db.crt"
     if [ $? -ne 0 ]; then
@@ -510,10 +498,9 @@ if [ -n "$SECURE_BOOT_FLAG" ] && [ -n "$SECRET_MANAGER_FLAG" ]; then
   fi
 
   # Rebuild the ESL set deterministically from the fixed GUID + persisted
-  # certs. No key generation and no new GUID: cert-to-efi-sig-list is
-  # byte-deterministic given a fixed cert + GUID, so PK/KEK/db ESLs — and thus
-  # PCR7 — are identical to prior runs. PK/KEK private keys are not needed
-  # (uefivars '-i none' consumes ESLs, not .auth files).
+  # certs (cert-to-efi-sig-list is byte-deterministic given a fixed cert +
+  # GUID). No key generation and no new GUID, so ESLs — and thus PCR7 — match
+  # prior runs.
   nix --extra-experimental-features nix-command --extra-experimental-features flakes shell \
     nixpkgs#efitools --command bash -c "
     cd '$LOCAL_KEY_DIR'
@@ -548,9 +535,7 @@ echo "Step 1: Creating AMI..."
 # Build the argument list for 00_create_ami.sh
 CREATE_AMI_ARGS="$SECURE_BOOT_FLAG $DEBUG_FLAG"
 if [ -n "$SECRET_MANAGER_FLAG" ]; then
-  # SECRET_ARN is the db signing-key secret. Pass it as --db-key-arn so
-  # sign-efi-image fetches the key from Secrets Manager and streams it into
-  # sbsign in memory; db.key is never written to sb-keys/ (PR #18 r3513902421).
+  # SECRET_ARN is the db signing-key secret; pass it through as --db-key-arn.
   if [ -n "$SECRET_ARN" ]; then
     CREATE_AMI_ARGS="$CREATE_AMI_ARGS --db-key-arn $SECRET_ARN"
   fi

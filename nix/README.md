@@ -83,7 +83,7 @@ Then the image can be built with:
 nix build .#raw-image
 ```
 
-The `tee-image` function produces an unsigned image with baseline TPM PCR4 measurements and an exported `unsigned.efi` UKI binary. Secure boot signing is an optional post-build step that keeps private keys out of the nix store.
+The `tee-image` function produces an unsigned image with baseline TPM PCR4 measurements and an exported `unsigned.efi` UKI binary. Secure boot signing is an optional post-build step (see [Secure Boot Workflow](#secure-boot-workflow)).
 
 We also provide additional tools to streamline the AMI creation and signing process:
 

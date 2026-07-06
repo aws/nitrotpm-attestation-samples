@@ -16,18 +16,13 @@ Before you begin, ensure you have the following:
 
 ## Important Note on Secure Boot and Reproducibility
 
-Secure boot signing is a **post-build step** performed outside of the nix derivation. This keeps private signing keys (`db.key`) out of the nix store and cache.
+Secure boot signing is a **post-build step** performed outside of the nix derivation, keeping private signing keys (`db.key`) out of the nix store — see the [Secure Boot Workflow](../../README.md#secure-boot-workflow) for the build → sign → create-ami sequence.
 
-The build workflow is:
-1. `nix build .#raw-image` — produces an unsigned image and UKI
-2. `nix run .#sign-efi-image -- <image-dir> <keys-dir> > tpm_pcr.json` — signs the UKI, patches the ESP, emits `uefi_data.aws`, and prints the full PCR set (PCR4 + PCR7) to stdout
-3. `nix run .#create-ami -- result/nixos-tee_1.raw uefi_data.aws` — registers AMI with UEFI secure boot data
-
-In production, reuse a consistent secure boot identity (the same GUID + PK/KEK/db certs) for reproducible measurements — see [Reproducible PCR7](#reproducible-pcr7-persist-the-whole-identity-not-just-db) below. `--secrets-manager` handles this automatically.
+For reproducible measurements, reuse a consistent secure boot identity (same GUID + PK/KEK/db certs) — see [Reproducible PCR7](#reproducible-pcr7-persist-the-whole-identity-not-just-db) below. `--secrets-manager` handles this automatically.
 
 ## Using AWS Secrets Manager for Signing Keys
 
-The `--secrets-manager` flag enables storing and retrieving the secure boot **golden identity** via AWS Secrets Manager. This keeps the private key (`db.key`) completely out of the nix store and build cache. The private key is **never written to the local filesystem at all**: `sign-efi-image` fetches it from Secrets Manager and streams it straight into `sbsign` through an in-memory file descriptor, so it exists only in process memory for the duration of the signing call.
+The `--secrets-manager` flag stores and retrieves the secure boot **golden identity** via AWS Secrets Manager, keeping the private `db.key` out of the nix store and off the local filesystem entirely (see [Security Benefit](#security-benefit) for the mechanism).
 
 ### Reproducible PCR7: persist the whole identity, not just db
 
@@ -45,7 +40,7 @@ On each run the ESLs are rebuilt deterministically from these fixed inputs (`cer
 
 The PK/KEK **private** keys are never persisted or uploaded: the UEFI variable store is built with `uefivars -i none`, which consumes the ESLs (not the `.auth` enrollment files), so the PK/KEK private keys are unused after cert generation.
 
-The db signing **private** key (`db.key`) stays in Secrets Manager and is never written to the local filesystem during a deployment. At signing time `sign-efi-image` receives its Secret ARN (`--db-key-arn`), fetches the PEM into memory, and streams it into `sbsign` via an in-memory file descriptor. Only the public `db.crt` and the PK/KEK/db ESLs are staged as files (see [Security Benefit](#security-benefit)).
+The db signing **private** key (`db.key`) stays in Secrets Manager; only the public `db.crt` and the PK/KEK/db ESLs are staged as files (see [Security Benefit](#security-benefit)).
 
 **Regenerating the identity is a deliberate PCR7 roll.** Reusing the retained identity keeps PCR7 stable — which is the point of binding PCR7 in a KMS policy: one policy that survives image updates. Conversely, generating a fresh identity intentionally changes PCR7. This is the AWS revocation model: to prevent instances launched from old (untrusted) AMIs from passing your KMS policy, generate a new identity, rebuild the AMI, and update the policy to the new PCR7.
 
@@ -69,11 +64,9 @@ When no `SECRET_ARN` is provided, the script enters interactive mode:
 
 In this mode the script:
 1. Prompts you to confirm generation of a new signing identity
-2. Generates a fixed owner GUID and the PK, KEK, and db keys/certs with OpenSSL **entirely in memory** — no private key is written to disk. PK/KEK are self-signed with `openssl req -keyout /dev/null` (their private keys are discarded immediately); `db.key` is produced by `openssl genpkey` to stdout and kept only in a shell variable
-3. Streams `db.key`, `db.crt`, and the identity bundle (`{guid, pk_crt, kek_crt}`) into AWS Secrets Manager via process substitution (a pipe), so no file is created
-4. Saves the resulting `SECRET_ARN`, `SECRET_CERT_ARN`, and `IDENTITY_ARN` to `artifacts/resources.json`
-
-At no point during generation or upload is a private key written to the filesystem. On subsequent deployments the private `db.key` is likewise never downloaded to disk — it is streamed from Secrets Manager into `sbsign` in memory during signing.
+2. Generates a fixed owner GUID and the PK, KEK, and db keys/certs with OpenSSL **entirely in memory** (PK/KEK private keys are discarded immediately; `db.key` is kept only in a shell variable)
+3. Streams `db.key`, `db.crt`, and the identity bundle (`{guid, pk_crt, kek_crt}`) into AWS Secrets Manager via process substitution, so no private key is ever written to disk
+4. Saves the three ARNs to `artifacts/resources.json`
 
 ### Subsequent Deployments (With ARN)
 
@@ -83,11 +76,9 @@ For subsequent deployments, provide the existing signing-key Secret ARN to retri
 ./scripts/start.sh --secure-boot --secrets-manager arn:aws:secretsmanager:REGION:ACCOUNT:secret:NAME
 ```
 
-The ARN on the command line is the `db.key` secret; the script resolves the matching `SECRET_CERT_ARN` and `IDENTITY_ARN` from `artifacts/resources.json` and reassembles the full identity to rebuild a reproducible envelope. The public artifacts (`db.crt`, fixed GUID, PK/KEK certs) are staged as files to rebuild the ESLs; the private `db.key` is left in Secrets Manager and its ARN is handed to `sign-efi-image` so the key is fetched in-memory at signing time. If those companion ARNs are not found, the run aborts — run interactive mode (`--secrets-manager` with no ARN) to generate a complete identity.
+The ARN on the command line is the `db.key` secret; the script resolves the matching `SECRET_CERT_ARN` and `IDENTITY_ARN` from `artifacts/resources.json` and reassembles the full identity to rebuild a reproducible envelope. The public artifacts (`db.crt`, fixed GUID, PK/KEK certs) are staged as files to rebuild the ESLs; the private `db.key` stays in Secrets Manager. If those companion ARNs are not found, the run aborts — run interactive mode (`--secrets-manager` with no ARN) to generate a complete identity.
 
 Alternatively, run interactive mode with a populated `resources.json` and the script offers to reuse the retained identity directly (no ARN needed on the command line).
-
-The ARNs for subsequent deployments can be found in `artifacts/resources.json` under `SECRET_ARN`, `SECRET_CERT_ARN`, and `IDENTITY_ARN`.
 
 ### Security Benefit
 

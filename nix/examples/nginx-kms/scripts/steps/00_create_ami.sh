@@ -10,7 +10,6 @@
 
 set -uo pipefail
 
-# Parse command line arguments
 SECURE_BOOT=false
 DEBUG=false
 DB_KEY_ARN=""
@@ -25,15 +24,12 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --db-key-arn)
-      # The db signing key stays in Secrets Manager: sign-efi-image fetches it
-      # and streams it into sbsign in memory, so no db.key file is staged in
-      # sb-keys/. Only the public db.crt + ESLs live on disk.
       DB_KEY_ARN="$2"
       shift 2
       ;;
-    --secrets-manager|--secret-cert-arn)
-      # Accepted for backwards compatibility with start.sh; the actual
-      # Secrets Manager retrieval and key staging happens in start.sh.
+    --secret-cert-arn)
+      # Accepted but unused here; start.sh does the Secrets Manager retrieval
+      # and key staging before invoking this script.
       shift 2
       ;;
     *)
@@ -59,8 +55,7 @@ if [ "$SECURE_BOOT" = true ]; then
     echo "       start.sh should populate sb-keys/ with the key hierarchy."
     exit 1
   fi
-  # db.key is only staged on disk when NOT fetching it from Secrets Manager.
-  # With --db-key-arn, sign-efi-image streams the key in memory.
+  # db.key is only staged on disk when NOT fetching it via --db-key-arn.
   REQUIRED_SB_FILES="db.crt PK.esl KEK.esl db.esl"
   [ -z "$DB_KEY_ARN" ] && REQUIRED_SB_FILES="db.key $REQUIRED_SB_FILES"
   for f in $REQUIRED_SB_FILES; do
@@ -88,10 +83,9 @@ if [ ! -d "result" ]; then
 fi
 
 if [ "$SECURE_BOOT" = true ]; then
-  # The result/ directory is a read-only nix store symlink. sign-efi-image
-  # copies the raw image to a writable location, signs the UKI, generates
-  # uefi_data.aws, and patches the signed UKI into the ESP. All of this
-  # happens at runtime — db.key never enters /nix/store/.
+  # result/ is a read-only nix store symlink, so copy to a writable location
+  # first. Signing runs outside the nix derivation, so db.key never enters
+  # /nix/store/.
   echo "Signing UKI and patching into ESP..."
   WORK_DIR="$PROJECT_DIR/signed-image"
   rm -rf "$WORK_DIR"
@@ -99,11 +93,9 @@ if [ "$SECURE_BOOT" = true ]; then
   cp -r result/. "$WORK_DIR/"
   chmod -R u+w "$WORK_DIR"
 
-  # sign-efi-image signs the UKI, patches the ESP, builds the UEFI var
-  # store, and prints the full PCR set (PCR4 + PCR7) to stdout, which we
-  # capture into tpm_pcr.json. When a db-key ARN is supplied, the private
-  # signing key is streamed from Secrets Manager into sbsign in memory and
-  # never staged in sb-keys/.
+  # sign-efi-image signs the UKI, patches the ESP, builds the UEFI var store,
+  # and prints the full PCR set (PCR4 + PCR7) to stdout, captured into
+  # tpm_pcr.json.
   SIGN_ARGS=("$WORK_DIR" "$PROJECT_DIR/sb-keys")
   [ -n "$DB_KEY_ARN" ] && SIGN_ARGS+=(--db-key-arn "$DB_KEY_ARN")
   nix --extra-experimental-features nix-command --extra-experimental-features flakes \
