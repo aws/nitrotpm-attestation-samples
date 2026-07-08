@@ -12,7 +12,7 @@ set -uo pipefail
 
 SECURE_BOOT=false
 DEBUG=false
-DB_KEY_ARN=""
+IDENTITY_ARN=""
 while [[ $# -gt 0 ]]; do
   case $1 in
     --secure-boot)
@@ -23,13 +23,8 @@ while [[ $# -gt 0 ]]; do
       DEBUG=true
       shift
       ;;
-    --db-key-arn)
-      DB_KEY_ARN="$2"
-      shift 2
-      ;;
-    --secret-cert-arn)
-      # Accepted but unused here; start.sh does the Secrets Manager retrieval
-      # and key staging before invoking this script.
+    --identity-arn)
+      IDENTITY_ARN="$2"
       shift 2
       ;;
     *)
@@ -55,9 +50,9 @@ if [ "$SECURE_BOOT" = true ]; then
     echo "       start.sh should populate sb-keys/ with the key hierarchy."
     exit 1
   fi
-  # db.key is only staged on disk when NOT fetching it via --db-key-arn.
+  # db.key is only staged on disk when NOT fetching it via --identity-arn.
   REQUIRED_SB_FILES="db.crt PK.esl KEK.esl db.esl"
-  [ -z "$DB_KEY_ARN" ] && REQUIRED_SB_FILES="db.key $REQUIRED_SB_FILES"
+  [ -z "$IDENTITY_ARN" ] && REQUIRED_SB_FILES="db.key $REQUIRED_SB_FILES"
   for f in $REQUIRED_SB_FILES; do
     if [ ! -f "sb-keys/$f" ]; then
       echo "Error: secure boot requested but sb-keys/$f is missing."
@@ -97,7 +92,7 @@ if [ "$SECURE_BOOT" = true ]; then
   # and prints the full PCR set (PCR4 + PCR7) to stdout, captured into
   # tpm_pcr.json.
   SIGN_ARGS=("$WORK_DIR" "$PROJECT_DIR/sb-keys")
-  [ -n "$DB_KEY_ARN" ] && SIGN_ARGS+=(--db-key-arn "$DB_KEY_ARN")
+  [ -n "$IDENTITY_ARN" ] && SIGN_ARGS+=(--identity-arn "$IDENTITY_ARN")
   nix --extra-experimental-features nix-command --extra-experimental-features flakes \
     run .#sign-efi-image -- "${SIGN_ARGS[@]}" \
     > "$WORK_DIR/tpm_pcr.json"

@@ -6,5 +6,4 @@
 **/signed-image
 **/signed.efi
 **/tpm_pcr.json
-**/tmp.json
 **/*.bak

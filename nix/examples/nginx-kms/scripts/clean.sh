@@ -46,8 +46,6 @@ INSTANCE_PROFILE_NAME=$(jq -r '.INSTANCE_PROFILE_NAME // empty' "$RESOURCES_FILE
 KMS_KEY_ID=$(jq -r '.KMS_KEY_ID // empty' "$RESOURCES_FILE")
 INSTANCE_ID=$(jq -r '.INSTANCE_ID // empty' "$RESOURCES_FILE")
 SECURITY_GROUP_ID=$(jq -r '.SECURITY_GROUP_ID // empty' "$RESOURCES_FILE")
-SECRET_ARN=$(jq -r '.SECRET_ARN // empty' "$RESOURCES_FILE")
-SECRET_CERT_ARN=$(jq -r '.SECRET_CERT_ARN // empty' "$RESOURCES_FILE")
 IDENTITY_ARN=$(jq -r '.IDENTITY_ARN // empty' "$RESOURCES_FILE")
 
 # Track cleanup success
@@ -73,66 +71,36 @@ run_aws_command_optional() {
   fi
 }
 
-# Delete Secrets Manager secrets
-if [ -n "$SECRET_ARN" ] || [ -n "$SECRET_CERT_ARN" ] || [ -n "$IDENTITY_ARN" ]; then
+# Delete Secrets Manager secret (the single golden identity)
+if [ -n "$IDENTITY_ARN" ]; then
   echo ""
-  echo "Secrets Manager secrets found:"
-  [ -n "$SECRET_ARN" ] && echo "  Key:      $SECRET_ARN"
-  [ -n "$SECRET_CERT_ARN" ] && echo "  Cert:     $SECRET_CERT_ARN"
-  [ -n "$IDENTITY_ARN" ] && echo "  Identity: $IDENTITY_ARN"
+  echo "Secrets Manager secret found:"
+  echo "  Identity: $IDENTITY_ARN"
   if [ -n "$DELETE_SECRETS_FORCE" ]; then
     DELETE_SECRETS="$DELETE_SECRETS_FORCE"
     echo "Forced answer (--delete-secrets): $DELETE_SECRETS"
   elif [ "$NON_INTERACTIVE" = true ]; then
     DELETE_SECRETS="no"
-    echo "Non-interactive mode: retaining secrets (default)."
+    echo "Non-interactive mode: retaining secret (default)."
   else
-    read -r -p "Delete these secrets, do not reuse? (yes/no): " DELETE_SECRETS
+    read -r -p "Delete this secret, do not reuse? (yes/no): " DELETE_SECRETS
   fi
 
   if [[ "$DELETE_SECRETS" == "yes" ]]; then
-    if [ -n "$SECRET_ARN" ]; then
-      echo "Deleting Secrets Manager secret: $SECRET_ARN"
-      if ! output=$(aws secretsmanager delete-secret --secret-id "$SECRET_ARN" --force-delete-without-recovery 2>&1); then
-        if echo "$output" | grep -q "ResourceNotFoundException"; then
-          echo "Secret already deleted: $SECRET_ARN"
-        else
-          echo "Error deleting secret: $SECRET_ARN"
-          echo "Output: $output"
-          CLEANUP_SUCCESS=false
-        fi
-      fi
-    fi
-
-    if [ -n "$SECRET_CERT_ARN" ]; then
-      echo "Deleting Secrets Manager secret: $SECRET_CERT_ARN"
-      if ! output=$(aws secretsmanager delete-secret --secret-id "$SECRET_CERT_ARN" --force-delete-without-recovery 2>&1); then
-        if echo "$output" | grep -q "ResourceNotFoundException"; then
-          echo "Secret already deleted: $SECRET_CERT_ARN"
-        else
-          echo "Error deleting secret: $SECRET_CERT_ARN"
-          echo "Output: $output"
-          CLEANUP_SUCCESS=false
-        fi
-      fi
-    fi
-
-    if [ -n "$IDENTITY_ARN" ]; then
-      echo "Deleting Secrets Manager secret: $IDENTITY_ARN"
-      if ! output=$(aws secretsmanager delete-secret --secret-id "$IDENTITY_ARN" --force-delete-without-recovery 2>&1); then
-        if echo "$output" | grep -q "ResourceNotFoundException"; then
-          echo "Secret already deleted: $IDENTITY_ARN"
-        else
-          echo "Error deleting secret: $IDENTITY_ARN"
-          echo "Output: $output"
-          CLEANUP_SUCCESS=false
-        fi
+    echo "Deleting Secrets Manager secret: $IDENTITY_ARN"
+    if ! output=$(aws secretsmanager delete-secret --secret-id "$IDENTITY_ARN" --force-delete-without-recovery 2>&1); then
+      if echo "$output" | grep -q "ResourceNotFoundException"; then
+        echo "Secret already deleted: $IDENTITY_ARN"
+      else
+        echo "Error deleting secret: $IDENTITY_ARN"
+        echo "Output: $output"
+        CLEANUP_SUCCESS=false
       fi
     fi
     SECRETS_RETAINED=false
   else
-    echo "Retaining Secrets Manager secrets."
-    echo "To reuse on next deployment: ./scripts/start.sh --secure-boot --secrets-manager $SECRET_ARN"
+    echo "Retaining Secrets Manager secret."
+    echo "To reuse on next deployment: ./scripts/start.sh --secure-boot --secrets-manager $IDENTITY_ARN"
     SECRETS_RETAINED=true
   fi
 fi
@@ -200,11 +168,11 @@ fi
 if [ "$CLEANUP_SUCCESS" = true ]; then
   echo "Cleanup completed successfully. Note that some resources may take time to be fully deleted."
   if [ "$SECRETS_RETAINED" = true ]; then
-    # Preserve resources.json with only the retained secret ARNs (the full
-    # golden identity: key, cert, and identity bundle) so PCR7 stays
-    # reproducible on the next deployment.
-    echo "Preserving resources file with retained secret ARNs."
-    jq '{SECRET_ARN, SECRET_CERT_ARN, IDENTITY_ARN} | with_entries(select(.value != null))' "$RESOURCES_FILE" > tmp.json && mv tmp.json "$RESOURCES_FILE"
+    # Preserve resources.json with only the retained identity ARN (the full
+    # golden identity) so PCR7 stays reproducible on the next deployment.
+    echo "Preserving resources file with retained identity ARN."
+    RESOURCES_TMP=$(mktemp "${RESOURCES_FILE}.XXXXXX")
+    jq '{IDENTITY_ARN} | with_entries(select(.value != null))' "$RESOURCES_FILE" > "$RESOURCES_TMP" && mv "$RESOURCES_TMP" "$RESOURCES_FILE" || rm -f "$RESOURCES_TMP"
   else
     echo "Removing resource tracking files."
     rm -rf "$ARTIFACTS_DIR"

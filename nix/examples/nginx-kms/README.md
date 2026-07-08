@@ -28,35 +28,33 @@ The `--secrets-manager` flag stores and retrieves the secure boot **golden ident
 
 PCR7 measures the UEFI secure boot policy — the byte-exact contents of the PK, KEK, and db EFI Signature Lists (ESLs). Each ESL embeds the owner GUID and the DER-encoded certificate, so PCR7 changes if the GUID or **any** of the PK/KEK/db certs change. Persisting only `db.key`/`db.crt` is therefore not enough for a reproducible PCR7: freshly generating PK/KEK and a random GUID on each run produces a different PCR7 every deployment.
 
-To make PCR7 reproducible, `--secrets-manager` persists the entire golden identity as **three** secrets:
+To make PCR7 reproducible, `--secrets-manager` persists the entire golden identity as a **single** JSON secret named `nitrotpm-sb-identity-<ts>`. The secret value is a JSON object with five fields:
 
-| Secret name | Contents | Purpose |
-|-------------|----------|---------|
-| `nitrotpm-sb-signing-key-<ts>` | `db.key` | signs the UKI (private key) |
-| `nitrotpm-sb-signing-cert-<ts>` | `db.crt` | rebuilds `db.esl` |
-| `nitrotpm-sb-identity-<ts>` | JSON `{guid, pk_crt, kek_crt}` | rebuilds `PK.esl` / `KEK.esl` with a fixed owner GUID |
+- `guid` — the fixed owner GUID embedded in every ESL.
+- `db_key` — the db signing **private** key (PEM). Signs the UKI; never written to disk (see [Security Benefit](#security-benefit)).
+- `db_crt` — the db public certificate (PEM). Rebuilds `db.esl`.
+- `pk_crt` — the Platform Key certificate (PEM). Rebuilds `PK.esl` with the fixed GUID.
+- `kek_crt` — the Key Exchange Key certificate (PEM). Rebuilds `KEK.esl` with the fixed GUID.
 
-On each run the ESLs are rebuilt deterministically from these fixed inputs (`cert-to-efi-sig-list` is byte-deterministic given a fixed cert + GUID), so PCR4 **and** PCR7 are identical across deployments. The corresponding ARNs are stored in `artifacts/resources.json` (`SECRET_ARN`, `SECRET_CERT_ARN`, `IDENTITY_ARN`) and reused automatically.
+On each run the ESLs are rebuilt deterministically from these fixed inputs (`cert-to-efi-sig-list` is byte-deterministic given a fixed cert + GUID), so PCR4 **and** PCR7 are identical across deployments. The single ARN is stored in `artifacts/resources.json` (`IDENTITY_ARN`) and reused automatically.
 
-The PK/KEK **private** keys are never persisted or uploaded: the UEFI variable store is built with `uefivars -i none`, which consumes the ESLs (not the `.auth` enrollment files), so the PK/KEK private keys are unused after cert generation.
-
-The db signing **private** key (`db.key`) stays in Secrets Manager; only the public `db.crt` and the PK/KEK/db ESLs are staged as files (see [Security Benefit](#security-benefit)).
+The PK/KEK **private** keys are never persisted or uploaded: the UEFI variable store is built with `uefivars -i none`, which consumes the ESLs (not the `.auth` enrollment files), so the PK/KEK private keys are unused after cert generation. Only the db signing key persists, and it stays in the secret (see [Security Benefit](#security-benefit)).
 
 **Regenerating the identity is a deliberate PCR7 roll.** Reusing the retained identity keeps PCR7 stable — which is the point of binding PCR7 in a KMS policy: one policy that survives image updates. Conversely, generating a fresh identity intentionally changes PCR7. This is the AWS revocation model: to prevent instances launched from old (untrusted) AMIs from passing your KMS policy, generate a new identity, rebuild the AMI, and update the policy to the new PCR7.
 
-Reuse is **strict**: all three ARNs must be present to reuse a retained identity. A partial `resources.json` (e.g. a legacy file with only `db`) is rejected for reuse and a full new identity is generated, because mixing an old db cert with a freshly generated PK/KEK/GUID would silently break PCR7.
+Because the whole identity is one secret, reuse needs only that single ARN — there is no partial-identity state to reconcile (the earlier three-secret layout could leave an old db cert paired with a freshly generated PK/KEK/GUID, silently breaking PCR7; one secret removes that failure mode entirely).
 
 ### Syntax
 
 ```sh
-./scripts/start.sh --secure-boot --secrets-manager [SECRET_ARN]
+./scripts/start.sh --secure-boot --secrets-manager [IDENTITY_ARN]
 ```
 
 The `--secrets-manager` flag **requires** `--secure-boot`. The script exits with an error if `--secure-boot` is not provided.
 
 ### First-Time Deployment (No ARN)
 
-When no `SECRET_ARN` is provided, the script enters interactive mode:
+When no `IDENTITY_ARN` is provided, the script enters interactive mode:
 
 ```sh
 ./scripts/start.sh --secure-boot --secrets-manager
@@ -64,25 +62,25 @@ When no `SECRET_ARN` is provided, the script enters interactive mode:
 
 In this mode the script:
 1. Prompts you to confirm generation of a new signing identity
-2. Generates a fixed owner GUID and the PK, KEK, and db keys/certs with OpenSSL **entirely in memory** (PK/KEK private keys are discarded immediately; `db.key` is kept only in a shell variable)
-3. Streams `db.key`, `db.crt`, and the identity bundle (`{guid, pk_crt, kek_crt}`) into AWS Secrets Manager via process substitution, so no private key is ever written to disk
-4. Saves the three ARNs to `artifacts/resources.json`
+2. Generates a fixed owner GUID and the PK, KEK, and db keys/certs with OpenSSL **entirely in memory** (PK/KEK private keys are discarded immediately; `db.key` is emitted only as a field of the in-memory identity JSON)
+3. Streams the whole identity JSON (the fields above) into AWS Secrets Manager via process substitution, so no private key is ever written to disk
+4. Saves the single ARN to `artifacts/resources.json`
 
 ### Subsequent Deployments (With ARN)
 
-For subsequent deployments, provide the existing signing-key Secret ARN to retrieve the golden identity from Secrets Manager:
+For subsequent deployments, provide the existing identity Secret ARN to retrieve the golden identity from Secrets Manager:
 
 ```sh
 ./scripts/start.sh --secure-boot --secrets-manager arn:aws:secretsmanager:REGION:ACCOUNT:secret:NAME
 ```
 
-The ARN on the command line is the `db.key` secret; the script resolves the matching `SECRET_CERT_ARN` and `IDENTITY_ARN` from `artifacts/resources.json` and reassembles the full identity to rebuild a reproducible envelope. The public artifacts (`db.crt`, fixed GUID, PK/KEK certs) are staged as files to rebuild the ESLs; the private `db.key` stays in Secrets Manager. If those companion ARNs are not found, the run aborts — run interactive mode (`--secrets-manager` with no ARN) to generate a complete identity.
+The ARN on the command line is the single golden-identity secret. Its public fields (`db.crt`, fixed GUID, PK/KEK certs) are staged as files to rebuild the ESLs; the private `db.key` stays in the secret and is fetched in memory at signing time.
 
 Alternatively, run interactive mode with a populated `resources.json` and the script offers to reuse the retained identity directly (no ARN needed on the command line).
 
 ### Security Benefit
 
-When `--secrets-manager` is active, the private signing key never enters the nix store **and never touches the filesystem**. `sign-efi-image` receives the key's Secret ARN (`--db-key-arn`), fetches the PEM from Secrets Manager into memory, and feeds it to `sbsign` via a process-substitution file descriptor (`--key <(…)`). No `db.key` file is created in `sb-keys/`, the image dir, or any temp path, so the key cannot leak through nix store inspection, binary caches, or a stale file left on disk. Only public artifacts (`db.crt` and the PK/KEK/db ESLs) are staged as files. (PR #18 r3513902421.)
+When `--secrets-manager` is active, the private signing key never enters the nix store **and never touches the filesystem**. `sign-efi-image` receives the golden-identity Secret ARN (`--identity-arn`), fetches the JSON from Secrets Manager, extracts the `db_key` PEM in memory, and feeds it to `sbsign` via a process-substitution file descriptor (`--key <(…)`). No `db.key` file is created in `sb-keys/`, the image dir, or any temp path, so the key cannot leak through nix store inspection, binary caches, or a stale file left on disk. Only public artifacts (`db.crt` and the PK/KEK/db ESLs) are staged as files.
 
 ## Getting Started
 Follow these steps to set up and test the Attestable AMI:

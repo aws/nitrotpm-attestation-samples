@@ -1,50 +1,23 @@
 #!/bin/bash
 #
-# Tests the reproducibility of the secure boot signing pipeline by computing
-# PCR7 (the UEFI secure boot policy measurement) under the two key-reuse
-# models --secrets-manager can implement.
+# Tests reproducibility of the secure boot signing pipeline.
 #
-# PCR7 measures the byte-exact contents of the PK/KEK/db EFI Signature Lists
-# (ESLs). Each ESL embeds the owner GUID and the DER-encoded certificate, so
-# ANY change to the GUID or to a PK/KEK/db cert changes PCR7.
+# PCR7 measures the byte-exact PK/KEK/db EFI Signature Lists (ESLs); each ESL
+# embeds the owner GUID and the DER cert, so ANY change to the GUID or a cert
+# changes PCR7. PCR4 (UKI content hash) tracks the image, not the keys.
 #
-#   Test 1 - CURRENT model (db-only reuse): NOT reproducible.
-#     --secrets-manager persists only db.key/db.crt. PK/KEK and the owner
-#     GUID are regenerated fresh every run, so PCR7 differs every run. This
-#     is the reproducibility gap reported in PR #18 (r3513426905).
+#   Test 1 - db-only reuse (the old model): NOT reproducible. PK/KEK + GUID
+#            regenerated each run -> PCR7 differs (the gap this fix closes).
+#   Test 2 - identity reuse (fixed): reproducible. Full identity persisted, ESLs
+#            rebuilt from fixed certs + GUID -> PCR7 identical.
+#   Test 3 - PCR7 is image-independent: same identity, two different UKIs ->
+#            PCR4 differs, PCR7 identical (also fails if the mutation was a no-op).
+#   Test 4 - db.key never touches disk: sign via --identity-arn -> PCR7 equals
+#            Test 2 and no db.key file exists. Needs AWS; skipped otherwise.
+#   Test 5 - generate_identity_material writes no private key to disk.
 #
-#   Test 2 - FIXED model (identity reuse): reproducible.
-#     The full golden identity is persisted as certs + a fixed GUID
-#     (db.key/db.crt + PK.crt/KEK.crt + GUID). The ESLs are rebuilt from
-#     those fixed inputs each run. cert-to-efi-sig-list is byte-deterministic
-#     given a fixed cert + GUID (the ESL format carries no timestamps), so
-#     PCR7 is identical across runs. PK/KEK private keys are never needed
-#     (the uefivars '-i none' model consumes ESLs, not .auth files).
-#
-#   Test 3 - PCR7 is image-independent.
-#     Same golden identity, but two DIFFERENT UKIs (the unsigned image is
-#     mutated between runs so PCR4 changes). PCR4 must differ and PCR7 must
-#     stay identical, proving PCR7 is a pure function of the enrolled key set
-#     and never measures the image. The test also breaks if PCR4 fails to
-#     change (the mutation was a no-op, so the invariant went untested).
-#
-#   Test 4 - db.key never touches the filesystem (PR #18 r3513902421).
-#     Signs via sign-efi-image's --db-key-arn path: the private signing key is
-#     streamed from AWS Secrets Manager straight into sbsign (via an in-memory
-#     process-substitution fd) and no db.key file is written to the keys dir or
-#     the image dir. Asserts (a) signing still succeeds, (b) PCR7 equals the
-#     file-based identity reuse (Test 2), proving the fd path is byte-identical,
-#     and (c) no db.key file exists on disk anywhere in the signing tree. This
-#     test REQUIRES AWS credentials + Secrets Manager access; it is skipped
-#     (not counted) when AWS is unavailable.
-#
-# PCR4 (UKI content hash) tracks the image: it is independent of the signing
-# keys and stays stable only while the unsigned UKI is unchanged (Tests 1-2),
-# and changes when the image changes (Test 3).
-#
-# Tests 1-3 do NOT call AWS. Test 4 does (it uploads a throwaway db.key secret
-# and deletes it afterward). The key-prep helpers mirror the corresponding
-# branches of scripts/start.sh; keep them in sync when that logic changes.
+# Tests 1-3, 5 do NOT call AWS; Test 4 does (throwaway secret, deleted after).
+# The key-prep helpers mirror scripts/start.sh; keep them in sync.
 #
 # Usage: ./scripts/test_reproducibility.sh
 
@@ -119,10 +92,8 @@ assert_pcr_differ() {
   fi
 }
 
-# Generates a one-time secure boot identity (PK/KEK/db keys + certs + a fixed
-# owner GUID) into the given directory. This models the golden identity that
-# --secrets-manager generates once and persists. PK.key/KEK.key are produced
-# for completeness but are NOT part of the reproducible reuse set.
+# Generate a one-time identity (PK/KEK/db keys + certs + fixed GUID) into
+# out_dir, modeling what --secrets-manager persists once.
 generate_identity() {
   local out_dir="$1"
   mkdir -p "$out_dir"
@@ -140,10 +111,8 @@ generate_identity() {
   chmod 0600 "$out_dir/PK.key" "$out_dir/KEK.key" "$out_dir/db.key"
 }
 
-# FIXED model: rebuild the ESL set from the persisted certs + fixed GUID, as
-# the fixed --secrets-manager path in start.sh does. No PK/KEK private keys
-# and no new GUID are involved, so the ESL bytes -- and thus PCR7 -- are
-# identical across runs.
+# FIXED model: rebuild the ESLs from the persisted certs + fixed GUID (as
+# start.sh's --secrets-manager path does). Includes db.key in the keys dir.
 prepare_keys_from_identity() {
   local dest="$1" identity="$2"
   mkdir -p "$dest"
@@ -161,9 +130,8 @@ prepare_keys_from_identity() {
   chmod 0600 "$dest/db.key"
 }
 
-# NO-DISK model: like prepare_keys_from_identity, but WITHOUT copying db.key
-# into the keys dir. Only public artifacts (db.crt + ESLs) live on disk; db.key
-# is supplied out-of-band via --db-key-arn. Used by Test 4.
+# NO-DISK model: like prepare_keys_from_identity but WITHOUT db.key on disk
+# (public artifacts only); db.key comes via --identity-arn. Used by Test 4.
 prepare_keys_no_dbkey() {
   local dest="$1" identity="$2"
   mkdir -p "$dest"
@@ -179,10 +147,8 @@ prepare_keys_no_dbkey() {
   " >/dev/null 2>&1
 }
 
-# CURRENT model: reuse only db.key/db.crt; regenerate PK/KEK and the owner
-# GUID fresh every run (mirrors today's --secrets-manager envelope block).
-# The fresh PK/KEK certs and random GUID change the PK/KEK/db ESL bytes, so
-# PCR7 differs every run -- the bug this fix addresses.
+# CURRENT model: reuse only db.key/db.crt; regenerate PK/KEK + GUID each run
+# (mirrors today's --secrets-manager envelope block) -> PCR7 differs.
 prepare_keys_db_only() {
   local dest="$1" identity="$2"
   mkdir -p "$dest"
@@ -204,9 +170,8 @@ prepare_keys_db_only() {
   chmod 0600 "$dest/db.key"
 }
 
-# Prepares an isolated, writable image directory by copying the unsigned
-# build output. sign-efi-image patches the raw image's ESP in place, so
-# each run needs its own copy.
+# Copy the unsigned build output into an isolated writable dir; sign-efi-image
+# patches the ESP in place, so each run needs its own copy.
 prepare_image_dir() {
   local out_dir="$1"
   rm -rf "$out_dir"
@@ -215,13 +180,9 @@ prepare_image_dir() {
   chmod -R u+w "$out_dir"
 }
 
-# Mutates the unsigned UKI in <image-dir> so its Authenticode hash -- and thus
-# PCR4 -- changes, simulating a genuinely different application image. It
-# overwrites a few bytes inside the .linux (kernel) section IN PLACE: same
-# size, same section layout, so the result is still a valid, signable PE, but
-# the whole-PE hash differs. <marker> is distinct per run, so two mutated
-# images differ deterministically (no reliance on randomness). PCR7 never
-# measures the image (see header), which Test 3 asserts.
+# Mutate the unsigned UKI in <image-dir> so PCR4 changes: overwrite bytes in
+# the .linux section IN PLACE (same size/layout -> still a signable PE). The
+# distinct <marker> makes two mutated images differ deterministically.
 mutate_uki() {
   local image_dir="$1" marker="$2"
   nix --extra-experimental-features nix-command --extra-experimental-features flakes shell \
@@ -236,34 +197,28 @@ mutate_uki() {
   " >/dev/null
 }
 
-# Signs the unsigned UKI in <image-dir> with the keys in <keys-dir>, then
-# computes PCR4+PCR7 against the signed UKI. Mirrors the sequence used by
-# scripts/steps/00_create_ami.sh.
+# Sign the UKI in <image-dir> with <keys-dir> and capture PCR4+PCR7.
 sign_and_compute_pcrs() {
   local image_dir="$1"
   local keys_dir="$2"
 
-  # sign-efi-image also computes the PCR set and prints it to stdout;
-  # progress goes to stderr, so redirect stdout into tpm_pcr.json.
+  # sign-efi-image prints the PCR JSON to stdout, progress to stderr.
   nix --extra-experimental-features nix-command --extra-experimental-features flakes \
     run .#sign-efi-image -- "$image_dir" "$keys_dir" \
     > "$image_dir/tpm_pcr.json" 2>/dev/null
 }
 
-# Signs the unsigned UKI using the NO-DISK db.key path: sign-efi-image fetches
-# db.key from Secrets Manager via --db-key-arn, so no db.key file is present in
-# <keys-dir> (only db.crt + ESLs). Mirrors the production --secrets-manager flow.
+# Sign via the no-disk path: sign-efi-image fetches db_key from Secrets Manager
+# (--identity-arn) in memory, so <keys-dir> holds only db.crt + ESLs.
 sign_and_compute_pcrs_via_arn() {
-  local image_dir="$1" keys_dir="$2" db_key_arn="$3"
+  local image_dir="$1" keys_dir="$2" identity_arn="$3"
 
   nix --extra-experimental-features nix-command --extra-experimental-features flakes \
-    run .#sign-efi-image -- "$image_dir" "$keys_dir" --db-key-arn "$db_key_arn" \
+    run .#sign-efi-image -- "$image_dir" "$keys_dir" --identity-arn "$identity_arn" \
     > "$image_dir/tpm_pcr.json" 2>/dev/null
 }
 
-# Fails the run unless NO db.key file exists anywhere under <dir>: the core
-# no-disk assertion (the private key must never be written to the filesystem
-# when signing via Secrets Manager).
+# Fail unless NO db.key file exists anywhere under <dir>.
 assert_no_db_key_on_disk() {
   local label="$1" dir="$2"
   local found
@@ -299,8 +254,7 @@ fi
 
 mkdir -p "$TEST_DIR"
 
-# The golden identity is generated ONCE and reused by both tests, exactly as
-# --secrets-manager generates it once and persists it in Secrets Manager.
+# Generate the identity ONCE; all tests reuse it.
 IDENTITY="$TEST_DIR/identity"
 run_step "Generating golden secure boot identity (once)" \
   generate_identity "$IDENTITY"
@@ -370,10 +324,7 @@ KEYS3B="$TEST_DIR/keys3b"
 RUN3A="$TEST_DIR/run3a"
 RUN3B="$TEST_DIR/run3b"
 
-# Reuse the SAME golden identity for both runs (as Test 2 does), but sign two
-# DIFFERENT UKIs. Each image dir gets its own unsigned.efi mutated with a
-# distinct marker, so PCR4 must differ; PCR7 must not, because it never
-# measures the image.
+# Same identity, two differently-mutated UKIs: PCR4 must differ, PCR7 must not.
 run_step "Run 3A: prepare keys (rebuild ESLs from identity)" prepare_keys_from_identity "$KEYS3A" "$IDENTITY"
 run_step "Run 3A: prepare image dir"                         prepare_image_dir "$RUN3A"
 run_step "Run 3A: mutate UKI (changes PCR4)"                 mutate_uki "$RUN3A" "PCR4-VARIANT-A"
@@ -384,8 +335,7 @@ run_step "Run 3B: mutate UKI (changes PCR4)"                 mutate_uki "$RUN3B"
 run_step "Run 3B: sign + compute PCRs"                       sign_and_compute_pcrs "$RUN3B" "$KEYS3B"
 
 echo
-# If PCR4 does NOT differ here the mutation did not take effect, so Test 3
-# would prove nothing -- assert_pcr_differ fails and flags that explicitly.
+# If PCR4 does NOT differ, the mutation was a no-op -- assert_pcr_differ fails.
 assert_pcr_differ "PCR4 (UKI hash, distinct images)" \
   "$RUN3A/tpm_pcr.json" "$RUN3B/tpm_pcr.json" "PCR4"
 assert_pcr_match  "PCR7 (secure boot policy, image-independent)" \
@@ -394,7 +344,7 @@ echo
 
 # ==== Test 4: db.key never touches disk ====
 echo "----------------------------------------------------"
-echo " Test 4: sign via --db-key-arn (no db.key on disk)"
+echo " Test 4: sign via --identity-arn (no db.key on disk)"
 echo "         EXPECT: signing OK, PCR7 == Test 2, no db.key file"
 echo "----------------------------------------------------"
 
@@ -415,39 +365,44 @@ if ! command -v aws >/dev/null 2>&1 \
 else
   KEYS4="$TEST_DIR/keys4"
   RUN4="$TEST_DIR/run4"
-  # Unique-ish secret name without Math.random/Date.now: derive from PID + PPID.
-  DBKEY_SECRET_NAME="nitrotpm-sb-test-dbkey-$$-$PPID"
-  DBKEY_ARN=""
+  # Unique-ish secret name derived from PID + PPID.
+  IDENTITY_SECRET_NAME="nitrotpm-sb-test-identity-$$-$PPID"
+  IDENTITY_ARN=""
 
-  # Upload the identity's db.key as a throwaway Secrets Manager secret, then
-  # ensure it is deleted no matter how the test exits.
+  # Upload a throwaway identity secret (production shape) and delete it on exit.
   cleanup_test4_secret() {
-    [ -n "$DBKEY_ARN" ] && aws secretsmanager delete-secret \
-      --secret-id "$DBKEY_ARN" --force-delete-without-recovery \
+    [ -n "$IDENTITY_ARN" ] && aws secretsmanager delete-secret \
+      --secret-id "$IDENTITY_ARN" --force-delete-without-recovery \
       --region "$SM_REGION" >/dev/null 2>&1
   }
   trap 'cleanup_test4_secret; cleanup' EXIT INT TERM
 
-  echo -e "${YELLOW}>>> Run 4: upload throwaway db.key to Secrets Manager${RESET}"
-  # Capture the ARN directly (not via run_step, whose label would pollute stdout).
-  DBKEY_ARN=$(aws secretsmanager create-secret --name "$DBKEY_SECRET_NAME" \
-    --secret-string file://"$IDENTITY/db.key" \
-    --query ARN --output text --region "$SM_REGION" 2>/dev/null | tr -d '[:space:]')
+  echo -e "${YELLOW}>>> Run 4: upload throwaway identity to Secrets Manager${RESET}"
+  # Assemble the identity JSON and stream it into create-secret (no secret file).
+  IDENTITY_ARN=$(jq -n \
+      --arg guid   "$(cat "$IDENTITY/GUID.txt")" \
+      --rawfile db_key  "$IDENTITY/db.key" \
+      --rawfile db_crt  "$IDENTITY/db.crt" \
+      --rawfile pk_crt  "$IDENTITY/PK.crt" \
+      --rawfile kek_crt "$IDENTITY/KEK.crt" \
+      '{guid: $guid, db_key: $db_key, db_crt: $db_crt, pk_crt: $pk_crt, kek_crt: $kek_crt}' \
+    | aws secretsmanager create-secret --name "$IDENTITY_SECRET_NAME" \
+        --secret-string file:///dev/stdin \
+        --query ARN --output text --region "$SM_REGION" 2>/dev/null | tr -d '[:space:]')
 
-  if [ -z "$DBKEY_ARN" ] || [[ "$DBKEY_ARN" != arn:aws:secretsmanager:* ]]; then
-    echo -e "${RED}FAIL${RESET} Test 4: could not create db.key secret"
+  if [ -z "$IDENTITY_ARN" ] || [[ "$IDENTITY_ARN" != arn:aws:secretsmanager:* ]]; then
+    echo -e "${RED}FAIL${RESET} Test 4: could not create identity secret"
     FAIL_COUNT=$((FAIL_COUNT + 1))
   else
     run_step "Run 4: prepare keys WITHOUT db.key on disk" prepare_keys_no_dbkey "$KEYS4" "$IDENTITY"
     run_step "Run 4: prepare image dir"                   prepare_image_dir "$RUN4"
-    run_step "Run 4: sign via ARN + compute PCRs"         sign_and_compute_pcrs_via_arn "$RUN4" "$KEYS4" "$DBKEY_ARN"
+    run_step "Run 4: sign via ARN + compute PCRs"         sign_and_compute_pcrs_via_arn "$RUN4" "$KEYS4" "$IDENTITY_ARN"
 
     echo
-    # (a) signing succeeded -> PCR7 present and equal to the file-based reuse
-    #     (Test 2), proving the in-memory fd signature is byte-identical.
+    # (a) PCR7 matches the file-based reuse (Test 2): the fd path is byte-identical.
     assert_pcr_match "PCR7 (fd path == file-based identity reuse)" \
       "$RUN4/tpm_pcr.json" "$RUN2A/tpm_pcr.json" "PCR7"
-    # (b) the private key was never written to disk anywhere in the tree.
+    # (b) db.key was never written anywhere in the tree.
     assert_no_db_key_on_disk "keys dir has no db.key"  "$KEYS4"
     assert_no_db_key_on_disk "image dir has no db.key" "$RUN4"
   fi
@@ -460,25 +415,22 @@ echo " Test 5: generate_identity_material (no key on disk)"
 echo "         EXPECT: valid db key/cert pair, zero *.key files"
 echo "----------------------------------------------------"
 
-# Source the real generation helper from start.sh so we exercise production
-# code, not a copy. start.sh runs top-level logic on source, so guard it: only
-# the function definitions are needed here. We extract just the function via a
-# marker-bounded sed so sourcing has no side effects.
-GEN_FN=$(sed -n '/^generate_identity_material() {/,/^}/p' "$SCRIPT_DIR/start.sh")
-if [ -z "$GEN_FN" ]; then
-  echo -e "${RED}FAIL${RESET} Test 5: could not extract generate_identity_material from start.sh"
+# Source the real generator (lib/identity.sh) so we exercise production code.
+if [ ! -f "$SCRIPT_DIR/lib/identity.sh" ]; then
+  echo -e "${RED}FAIL${RESET} Test 5: scripts/lib/identity.sh not found"
   FAIL_COUNT=$((FAIL_COUNT + 1))
 else
-  # Run generation under a sandbox dir used as TMPDIR + HOME, so any stray file
-  # (temp key, ~/.rnd, etc.) lands where we can detect it.
+  # shellcheck source=lib/identity.sh
+  . "$SCRIPT_DIR/lib/identity.sh"
+
+  # Run generation with TMPDIR + HOME pointed at a sandbox, so any stray file lands where we can detect it.
   SANDBOX="$TEST_DIR/gen-sandbox"
   rm -rf "$SANDBOX"; mkdir -p "$SANDBOX"
   GEN_OUT="$TEST_DIR/gen-material.json"
 
-  eval "$GEN_FN"
   ( export TMPDIR="$SANDBOX" HOME="$SANDBOX"; generate_identity_material ) > "$GEN_OUT" 2>/dev/null
 
-  # (a) material is complete and the db key/cert are a matching pair.
+  # (a) output is complete and the db key/cert are a matching pair.
   GEN_DB_KEY=$(jq -r '.db_key // empty' "$GEN_OUT" 2>/dev/null)
   GEN_DB_CRT=$(jq -r '.db_crt // empty' "$GEN_OUT" 2>/dev/null)
   GEN_GUID=$(jq -r '.guid // empty' "$GEN_OUT" 2>/dev/null)
@@ -498,12 +450,9 @@ else
   fi
   unset GEN_DB_KEY
 
-  # (b) no private key is ever WRITTEN to disk during generation. A post-hoc
-  #     file scan is insufficient — the old code wrote keys to a temp dir and
-  #     rm-rf'd them, leaving nothing to find. The faithful check is at the
-  #     syscall level: trace file-creating opens and assert none targets a
-  #     private-key file. Requires ptrace (yama scope 0); skip the assertion
-  #     (do not fail) when unavailable. strace is provided via nix.
+  # (b) no private key is WRITTEN during generation. A post-hoc file scan misses
+  #     keys that were written then rm'd, so trace the openat syscalls instead.
+  #     Requires ptrace (yama scope 0); skip (don't fail) when unavailable.
   if [ "$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo 0)" = "0" ]; then
     STRACE_LOG="$TEST_DIR/gen-strace.log"
     export -f generate_identity_material
@@ -512,11 +461,8 @@ else
         nixpkgs#strace --command bash -c \
         "strace -f -y -e trace=openat -o '$STRACE_LOG' bash -c 'generate_identity_material >/dev/null'"
     ) >/dev/null 2>&1 || true
-    # Opens with write/create intent, excluding the read-only nix store and
-    # kernel virtual filesystems; flag any path that looks like a private key.
-    # strace prints the path as the 2nd arg in quotes (relative paths like
-    # "db.key" appear verbatim, with the cwd shown separately as AT_FDCWD<...>).
-    # Extract the quoted path exactly (dropping both quotes), then match.
+    # Write/create opens, minus the read-only nix store and virtual filesystems;
+    # extract the quoted path (strace's 2nd arg) and flag anything key-like.
     WROTE_KEYS=$(grep -E 'O_(WRONLY|RDWR|CREAT)' "$STRACE_LOG" 2>/dev/null \
       | grep -oE ', "[^"]+", O_' | sed -E 's/^, "//; s/", O_$//' \
       | grep -vE '^/(nix|proc|sys|dev|etc)/' \
