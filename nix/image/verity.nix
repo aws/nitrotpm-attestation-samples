@@ -39,7 +39,7 @@ in {
   image.repart = {
     verityStore = {
       enable = true;
-      # by default the module works with systemd-boot, for simplicity this test directly boots the UKI
+      # by default the module works with systemd-boot; for simplicity this image directly boots the UKI
       inherit ukiPath;
     };
 
@@ -91,7 +91,6 @@ in {
     "tpm_crb.force=1"
     "systemd.gpt_auto=0" # Disable systemd-gpt-auto-generator to prevent e.g. ESP mounting
   ];
-  #networking.hostName = lib.mkDefault "nixos";
 
   formatAttr = lib.mkForce "finalImage";
   fileExtension = lib.mkForce ".raw";

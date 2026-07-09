@@ -1,5 +1,25 @@
 #!/bin/bash
 
+NON_INTERACTIVE=false
+DELETE_SECRETS_FORCE=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --non-interactive|--yes|-y)
+      NON_INTERACTIVE=true
+      shift
+      ;;
+    --delete-secrets)
+      DELETE_SECRETS_FORCE="yes"
+      shift
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      echo "Usage: $0 [--non-interactive] [--delete-secrets]" >&2
+      exit 1
+      ;;
+  esac
+done
+
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 ARTIFACTS_DIR="$SCRIPT_DIR/../artifacts"
 RESOURCES_FILE="$ARTIFACTS_DIR/resources.json"
@@ -26,9 +46,11 @@ INSTANCE_PROFILE_NAME=$(jq -r '.INSTANCE_PROFILE_NAME // empty' "$RESOURCES_FILE
 KMS_KEY_ID=$(jq -r '.KMS_KEY_ID // empty' "$RESOURCES_FILE")
 INSTANCE_ID=$(jq -r '.INSTANCE_ID // empty' "$RESOURCES_FILE")
 SECURITY_GROUP_ID=$(jq -r '.SECURITY_GROUP_ID // empty' "$RESOURCES_FILE")
+IDENTITY_ARN=$(jq -r '.IDENTITY_ARN // empty' "$RESOURCES_FILE")
 
 # Track cleanup success
 CLEANUP_SUCCESS=true
+SECRETS_RETAINED=false
 
 # Function to run AWS CLI commands with error handling
 run_aws_command() {
@@ -48,6 +70,40 @@ run_aws_command_optional() {
     return 1
   fi
 }
+
+# Delete Secrets Manager secret (the single golden identity)
+if [ -n "$IDENTITY_ARN" ]; then
+  echo ""
+  echo "Secrets Manager secret found:"
+  echo "  Identity: $IDENTITY_ARN"
+  if [ -n "$DELETE_SECRETS_FORCE" ]; then
+    DELETE_SECRETS="$DELETE_SECRETS_FORCE"
+    echo "Forced answer (--delete-secrets): $DELETE_SECRETS"
+  elif [ "$NON_INTERACTIVE" = true ]; then
+    DELETE_SECRETS="no"
+    echo "Non-interactive mode: retaining secret (default)."
+  else
+    read -r -p "Delete this secret, do not reuse? (yes/no): " DELETE_SECRETS
+  fi
+
+  if [[ "$DELETE_SECRETS" == "yes" ]]; then
+    echo "Deleting Secrets Manager secret: $IDENTITY_ARN"
+    if ! output=$(aws secretsmanager delete-secret --secret-id "$IDENTITY_ARN" --force-delete-without-recovery 2>&1); then
+      if echo "$output" | grep -q "ResourceNotFoundException"; then
+        echo "Secret already deleted: $IDENTITY_ARN"
+      else
+        echo "Error deleting secret: $IDENTITY_ARN"
+        echo "Output: $output"
+        CLEANUP_SUCCESS=false
+      fi
+    fi
+    SECRETS_RETAINED=false
+  else
+    echo "Retaining Secrets Manager secret."
+    echo "To reuse on next deployment: ./scripts/start.sh --secure-boot --secrets-manager $IDENTITY_ARN"
+    SECRETS_RETAINED=true
+  fi
+fi
 
 # Terminate EC2 instance
 if [ -n "$INSTANCE_ID" ]; then
@@ -111,8 +167,16 @@ fi
 # Only remove resource files if all cleanup operations succeeded
 if [ "$CLEANUP_SUCCESS" = true ]; then
   echo "Cleanup completed successfully. Note that some resources may take time to be fully deleted."
-  echo "Removing resource tracking files."
-  rm -rf "$ARTIFACTS_DIR"
+  if [ "$SECRETS_RETAINED" = true ]; then
+    # Preserve resources.json with only the retained identity ARN (the full
+    # golden identity) so PCR7 stays reproducible on the next deployment.
+    echo "Preserving resources file with retained identity ARN."
+    RESOURCES_TMP=$(mktemp "${RESOURCES_FILE}.XXXXXX")
+    jq '{IDENTITY_ARN} | with_entries(select(.value != null))' "$RESOURCES_FILE" > "$RESOURCES_TMP" && mv "$RESOURCES_TMP" "$RESOURCES_FILE" || rm -f "$RESOURCES_TMP"
+  else
+    echo "Removing resource tracking files."
+    rm -rf "$ARTIFACTS_DIR"
+  fi
 else
   echo "WARNING: Some cleanup operations failed. Resource file preserved at: $RESOURCES_FILE"
   echo "Please check your AWS credentials and re-run the cleanup script."

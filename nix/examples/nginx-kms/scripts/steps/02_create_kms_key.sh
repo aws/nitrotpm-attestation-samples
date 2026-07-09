@@ -33,7 +33,6 @@ fi
 extract_pcr_values() {
   local measurements_file="$1"
 
-  # Validate input file exists
   if [ ! -f "$measurements_file" ]; then
     echo "Error: Measurements file '$measurements_file' does not exist." >&2
     return 1
@@ -73,7 +72,6 @@ extract_pcr_values() {
     return 1
   fi
 
-  # Validate we got some output
   if [ -z "$pcr_output" ]; then
     echo "Error: No valid PCR values extracted from '$measurements_file'." >&2
     return 1
@@ -185,5 +183,4 @@ echo "AWS KMS command completed. Processing output..."
 KEY_ID=$(echo "$KEY_OUTPUT" | jq -r '.KeyMetadata.KeyId')
 echo "KMS key created with ID: $KEY_ID"
 
-# Clean up temporary policy file
 rm -f "$KEY_POLICY_FILE"

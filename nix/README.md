@@ -31,6 +31,8 @@ To ensure integrity, the Nix store is verified using [`dm-verity`](https://docs.
 
 The UKI binary is measured by the UEFI stage, with the measurement stored in TPM PCR4. This measurement is key to the integrity of the entire AMI and can be used in KMS key policies for decrypting secrets. Any change to system components (sample apps or NixOS config) will alter the `dm-verity` root-hash, which is passed in the UKI command line and ultimately reflected in the TPM PCR4 measurement.
 
+> **Security note (GHSA-xrv8-2pf5-f3q7):** When secure boot is disabled, systemd-boot may append externally-provided kernel command line data on top of the UKI's embedded cmdline. PCR4 does not cover that overlay — PCR12 does. KMS policies that protect attestable AMIs **must** bind `kms:RecipientAttestation:NitroTPMPCR12` (the unmodified-cmdline measurement is the all-zero SHA-384), or alternatively enable secure boot and bind PCR7. The `nginx-kms` example does this automatically. The flake also asserts that `nitrotpm-tools >= 1.1.0` (the version that emits PCR12 in `nitro-tpm-pcr-compute` output).
+
 ### Getting started
 
 To build Nix based Attestable AMIs, we provide a [Nix Flake](flake.nix). This flake exposes several [binary packages](tee/packages.nix) that can be used within your own NixOS configuration:
@@ -81,16 +83,51 @@ Then the image can be built with:
 nix build .#raw-image
 ```
 
-We also provide additional tools to streamline the AMI creation process:
+The `tee-image` function produces an unsigned image with baseline TPM PCR4 measurements and an exported `unsigned.efi` UKI binary. Secure boot signing is an optional post-build step (see [Secure Boot Workflow](#secure-boot-workflow)).
+
+We also provide additional tools to streamline the AMI creation and signing process:
 
 * `create-ami`: A Nix Flake app for uploading the RAW image as an EC2 AMI. It uses the [EBS direct API](https://docs.aws.amazon.com/ebs/latest/userguide/ebs-accessing-snapshot.html) to create an EBS snapshot and then generates a new AMI without launching an instance. Usage:
 ```bash
 nix run .#create-ami -- result/nixos-tee_1.raw
 ```
+* `sign-efi-image`: Signs the unsigned UKI with secure boot keys provided as file paths (not in the nix store), patches the signed UKI into the ESP partition of the writable raw image, and emits a `uefi_data.aws` UEFI variable store for AMI registration. After signing it computes the full TPM PCR set (PCR4 + PCR7) for the signed image and prints the JSON to stdout, so redirect it to capture the golden PCR values. Use this after building to add secure boot signatures without exposing `db.key` in the nix cache. `<image-dir>` is the output of `nix build .#raw-image` (containing `unsigned.efi`, the `*.raw` image, and `repart-output.json`) copied to a writable location; `<keys-dir>` contains `db.crt`, `PK.esl`, `KEK.esl`, and `db.esl` (plus `db.key` unless `--identity-arn` is used). Pass `--identity-arn <ARN>` to fetch the golden identity from AWS Secrets Manager, extract its db signing key, and stream it into `sbsign` in memory — the private key is then never written to disk (no `db.key` file is read from `<keys-dir>`). Usage:
+```bash
+nix run .#sign-efi-image -- <image-dir> <keys-dir> [--identity-arn <ARN>] > tpm_pcr.json
+```
+* `compute-pcrs`: Computes TPM PCR values for an EFI image (the upstream `nitro-tpm-pcr-compute` tool exposed directly). The producer flow does not need this — `sign-efi-image` already emits the PCRs — but it lets a verifier or relying party who has a signed image plus the public ESLs (and no signing key) independently compute the golden PCR values. When secure boot ESL files are provided, PCR7 is included alongside PCR4. Output goes to stdout; redirect to a file. Usage:
+```bash
+nix run .#compute-pcrs -- --image signed.efi --PK PK.esl --KEK KEK.esl --db db.esl > tpm_pcr.json
+```
+* `generate-uefi-vars`: Generates an AWS UEFI variable store (`uefi_data.aws`) from secure boot ESL files for AMI registration. Usage:
+```bash
+nix run .#generate-uefi-vars -- -P PK.esl -K KEK.esl --db db.esl -O uefi_data.aws
+```
 * `boot-uefi-qemu`: A debugging tool that uses QEMU to load the RAW image with a software-emulated TPM. Note that this environment cannot start the full attestation flow. Usage:
 ```bash
 nix run .#boot-uefi-qemu -- result/nixos-tee_1.raw
 ```
+
+### Secure Boot Workflow
+
+For workloads requiring secure boot, the signing pipeline runs outside of nix:
+
+```bash
+# 1. Build unsigned image (produces result/unsigned.efi and result/tpm_pcr.json
+#    with PCR4 only — PCR7 is added by sign-efi-image once keys are supplied)
+nix build .#raw-image
+
+# 2. Sign the UKI (in a secure environment). This also computes the full PCR
+#    set (PCR4 + PCR7) and prints it to stdout — redirect to capture it.
+nix run .#sign-efi-image -- <image-dir> <keys-dir> > tpm_pcr.json
+
+# 3. Create AMI with UEFI secure boot variable store
+nix run .#create-ami -- result/nixos-tee_1.raw result/uefi_data.aws
+```
+
+This separation ensures private signing keys never enter the nix store or cache, while builds remain fully reproducible (same source always produces the same unsigned image and PCR4 values).
+
+**Reproducible PCR7 requires a stable enrolled key set.** PCR4 (UKI content) is reproducible from the source alone, but PCR7 measures the PK/KEK/db EFI Signature Lists — including the owner GUID and every certificate. It is reproducible only if the *same* GUID and PK/KEK/db certs are reused across signings; regenerating any of them changes PCR7. The `nginx-kms` example persists this golden identity in AWS Secrets Manager (see its README) so PCR7 stays stable across deployments, and treats regenerating it as a deliberate PCR7 roll (the revocation model).
 
 ## Nix Web Server Example
 
