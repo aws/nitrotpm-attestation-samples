@@ -1,0 +1,10 @@
+name: Setup Nix
+description: Install pinned Nix with flakes enabled
+runs:
+  using: composite
+  steps:
+    - uses: cachix/install-nix-action@v27
+      with:
+        install_url: https://releases.nixos.org/nix/nix-2.18.9/install
+        extra_nix_config: |
+          experimental-features = nix-command flakes
