@@ -3,8 +3,14 @@ description: Install pinned Nix with flakes enabled
 runs:
   using: composite
   steps:
+    # Ubuntu 24.04 runners restrict unprivileged user namespaces via AppArmor,
+    # which breaks systemd-repart's `unshare --map-root-user` inside the nix
+    # build sandbox (uid_map write fails with EPERM).
+    - name: Allow unprivileged user namespaces
+      shell: bash
+      run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
     - uses: cachix/install-nix-action@v27
       with:
-        install_url: https://releases.nixos.org/nix/nix-2.18.9/install
+        install_url: https://releases.nixos.org/nix/nix-2.28.3/install
         extra_nix_config: |
           experimental-features = nix-command flakes
