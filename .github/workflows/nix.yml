@@ -1,0 +1,47 @@
+name: Nix CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-nix
+      # Eval concrete attrs instead of `nix flake check`, which rejects the
+      # callPackage-injected override/overrideDerivation attrs as non-derivations.
+      # Package targets are already evaluated by the build job; the apps are
+      # never built in CI, so this is their only check.
+      - name: Evaluate root flake apps
+        run: |
+          for app in $(nix eval "./nix#apps.x86_64-linux" --apply builtins.attrNames --json --no-write-lock-file | jq -r '.[]'); do
+            echo "== apps.$app =="
+            nix eval "./nix#apps.x86_64-linux.$app.program" --no-write-lock-file
+          done
+      # statix/deadnix report-only (non-gating).
+      - name: Lint with statix (report-only)
+        run: nix run nixpkgs#statix -- check nix/ || true
+      - name: Lint with deadnix (report-only)
+        run: nix run nixpkgs#deadnix -- nix/ || true
+
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - ./nix#kms-decrypt-app
+          - ./nix/examples/nginx-kms#raw-image
+          - ./nix/examples/nginx-kms#raw-image-debug
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-nix
+      - name: Build ${{ matrix.target }}
+        run: nix build '${{ matrix.target }}' --no-write-lock-file
