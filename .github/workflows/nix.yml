@@ -40,6 +40,8 @@ jobs:
           - ./nix#kms-decrypt-app
           - ./nix/examples/nginx-kms#raw-image
           - ./nix/examples/nginx-kms#raw-image-debug
+          - ./nix/examples/postgres-kms#raw-image
+          - ./nix/examples/postgres-kms#raw-image-debug
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-nix
