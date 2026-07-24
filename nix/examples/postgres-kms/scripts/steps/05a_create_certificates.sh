@@ -2,15 +2,19 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: $0 -r <ROLE_NAME>"
-  echo "  -r, --role-name     IAM role to grant Secrets Manager read access"
+  echo "Usage: $0 -r <ROLE_NAME> --symmetric-key <FILE>"
+  echo "  -r, --role-name      IAM role to grant Secrets Manager read access"
+  echo "  --symmetric-key      Path to the plaintext symmetric key file"
   exit 1
 }
+
+SYMMETRIC_KEY=""
 
 while [[ "$#" -gt 0 ]]; do
   case $1 in
     -k|--kms-key-id) shift ;; # accepted for backward compat, unused
     -r|--role-name) ROLE_NAME="$2"; shift ;;
+    --symmetric-key) SYMMETRIC_KEY="$2"; shift ;;
     *) usage ;;
   esac
   shift
@@ -23,8 +27,12 @@ fi
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 ARTIFACTS_DIR="$SCRIPT_DIR/../../artifacts"
-SYMMETRIC_KEY="$ARTIFACTS_DIR/symmetric_key.bin"
 USER_DATA_FILE="$ARTIFACTS_DIR/user_data.json"
+
+# Fall back to the legacy fixed path for backward compatibility
+if [ -z "$SYMMETRIC_KEY" ]; then
+  SYMMETRIC_KEY="$ARTIFACTS_DIR/symmetric_key.bin"
+fi
 
 if [ ! -f "$SYMMETRIC_KEY" ]; then
   echo "Error: Symmetric key not found at $SYMMETRIC_KEY"

@@ -370,11 +370,18 @@ phase1() {
 
   # Step 4: Create symmetric key
   echo "Step 4: Creating symmetric key..."
-  "$SCRIPT_DIR/steps/03_create_symmetric_key.sh" -k "$KMS_KEY_ID"
+  local KEY_TMPDIR
+  KEY_TMPDIR=$(mktemp -d)
+  chmod 700 "$KEY_TMPDIR"
+  local KEY_FILE="$KEY_TMPDIR/symmetric_key"
+  "$SCRIPT_DIR/steps/03_create_symmetric_key.sh" -k "$KMS_KEY_ID" --plaintext-key-out "$KEY_FILE" \
+    || { rm -rf "$KEY_TMPDIR"; return 1; }
 
   # Step 4a: Generate certificates and store client bundle in Secrets Manager
   echo "Step 4a: Creating certificates..."
-  "$SCRIPT_DIR/steps/05a_create_certificates.sh" -k "$KMS_KEY_ID" -r "$ROLE_NAME"
+  "$SCRIPT_DIR/steps/05a_create_certificates.sh" -r "$ROLE_NAME" --symmetric-key "$KEY_FILE" \
+    || { rm -rf "$KEY_TMPDIR"; return 1; }
+  rm -rf "$KEY_TMPDIR"
 
   # Step 5: Create EBS volume
   echo "Step 5: Creating EBS volume..."

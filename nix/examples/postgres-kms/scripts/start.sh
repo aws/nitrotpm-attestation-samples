@@ -296,7 +296,13 @@ update_resource "KMS_KEY_ID" "$KMS_KEY_ID"
 echo "KMS key created successfully. Key ID: $KMS_KEY_ID"
 
 echo "Step 4: Creating symmetric key and user data..."
-OUTPUT=$("$SCRIPT_DIR/steps/03_create_symmetric_key.sh" -k "$KMS_KEY_ID")
+KEY_TMPDIR=$(mktemp -d)
+chmod 700 "$KEY_TMPDIR"
+KEY_FILE="$KEY_TMPDIR/symmetric_key"
+cleanup_key_file() { rm -rf "$KEY_TMPDIR"; }
+trap cleanup_key_file EXIT
+
+OUTPUT=$("$SCRIPT_DIR/steps/03_create_symmetric_key.sh" -k "$KMS_KEY_ID" --plaintext-key-out "$KEY_FILE")
 
 if [ $? -ne 0 ]; then
   echo "Error: Symmetric key creation failed"
@@ -307,13 +313,15 @@ fi
 echo "Symmetric key and user data created successfully."
 
 echo "Step 5a: Creating certificates..."
-OUTPUT=$("$SCRIPT_DIR/steps/05a_create_certificates.sh" -k "$KMS_KEY_ID" -r "$ROLE_NAME")
+OUTPUT=$("$SCRIPT_DIR/steps/05a_create_certificates.sh" -r "$ROLE_NAME" --symmetric-key "$KEY_FILE")
 
 if [ $? -ne 0 ]; then
   echo "Error: Certificate creation failed"
   echo "$OUTPUT"
   exit 1
 fi
+
+rm -f "$KEY_FILE"
 
 SECRET_ARN=$(echo "$OUTPUT" | grep -oP 'SECRET_ARN: \K.*')
 
