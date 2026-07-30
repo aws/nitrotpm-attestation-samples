@@ -148,6 +148,18 @@ KEY_POLICY=$(cat <<EOF
       "Resource": "*"
     },
     {
+      "Sid": "Deny admin decrypt without attestation",
+      "Effect": "Deny",
+      "Principal": {
+        "AWS": "${ADMIN_ROLE}"
+      },
+      "Action": [
+        "kms:Decrypt",
+        "kms:ReEncryptFrom"
+      ],
+      "Resource": "*"
+    },
+    {
       "Sid": "Allow decryption for the Instance role",
       "Effect": "Allow",
       "Principal": {
