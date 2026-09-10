@@ -1,9 +1,9 @@
 **/result
 **/artifacts
 **/target
-**/flake.lock
 **/sb-keys
 **/signed-image
 **/signed.efi
 **/tpm_pcr.json
 **/*.bak
+**/CLAUDE.md

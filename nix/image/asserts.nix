@@ -21,7 +21,6 @@ in {
     message = "Root user must not have a password";
   }) rootUserDisallowedFields;
 
-  # Disable all console login services for zero operator access
   systemd.services."autovt@" = lib.mkForce {};
   systemd.services."getty@" = lib.mkForce {};
   systemd.services.getty-static = lib.mkForce {};

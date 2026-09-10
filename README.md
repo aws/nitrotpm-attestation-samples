@@ -4,6 +4,7 @@ This repository contains configurations and examples for creating [Attestable AM
 
 - [Nix Attestable AMI Builder](nix/) - a flake for the Nix package manager that provides the foundation for building [Attestable AMIs](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/attestable-ami.html) with Nix
 - [Nix Web Server Example](nix/examples/nginx-kms) - an example Attestable AMI based on the Nix Attestable AMI Builder that runs an attested decryption web server
+- [Nix PostgreSQL TEE Example](nix/examples/postgres-kms) - LUKS-encrypted PostgreSQL with mTLS, demonstrating secure boot signing via Secrets Manager (reproducible PCR7), KMS-gated volume decryption (PCR4+PCR7), and certificate-based client authentication
 
 ## Nix Attestable AMI Builder
 
